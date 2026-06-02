@@ -4,11 +4,31 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "bunx nano-staged --unstaged --quiet --bail || exit 2"
+            "command": "bunx nano-staged --unstaged --quiet --bail || exit 2",
+            "type": "command"
           }
         ]
       }
     ]
+  },
+  "mcp": {
+    "chrome-devtools": {
+      "args": ["chrome-devtools-mcp"],
+      "command": "bunx"
+    },
+    "chrome-devtools-nixos": {
+      "args": ["chrome-devtools-mcp", "--browserUrl=http://127.0.0.1:9222"],
+      "command": "bunx"
+    },
+    "fetch": {
+      "command": "mcp-server-fetch"
+    },
+    "filesystem": {
+      "args": ["."],
+      "command": "mcp-server-filesystem"
+    },
+    "memory": {
+      "command": "mcp-server-memory"
+    }
   }
 }

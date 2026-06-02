@@ -9,7 +9,13 @@
       "Bash(bun run *)",
       "Bash(oxlint packages/runtime/src/runtime.js)",
       "Bash(oxlint .)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(curl -s \"http://127.0.0.1:9222/json/list\")",
+      "Bash(curl -v \"http://127.0.0.1:9222/json\")",
+      "Bash(/nix/store/20crh01lwmlq0njl7pfqgq8q26kpdqnn-google-chrome-148.0.7778.215/share/google/chrome/chrome --remote-debugging-port=9222 --no-first-run --no-default-browser-check 'http://localhost:3000/packages/studio/index.html?project=~/Development/EliteEquipmentRental-jx/project.json&file=pages/excavators.md')",
+      "Bash(curl -s http://127.0.0.1:9222/json/list)",
+      "Bash(python3 -c \"import json,sys; tabs=json.load\\(sys.stdin\\); [print\\(t['id'], t.get\\('title',''\\)[:60], t.get\\('url',''\\)[:80]\\) for t in tabs if t.get\\('type'\\)=='page']\")",
+      "Bash(python3 -c ' *)"
     ]
   }
 }
