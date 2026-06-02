@@ -15,6 +15,7 @@ import {
   buildScope,
   defineElement,
   setSkipServerFunctions,
+  setRootMedia,
 } from "@jxsuite/runtime";
 import {
   getEffectiveElements,
@@ -348,8 +349,12 @@ export async function renderCanvasLive(gen: number, doc: JxMutableNode, canvasEl
       }
     }
 
-    // Inject site-level $media so runtime can resolve media queries in styles
+    // Inject site-level $media so runtime can resolve media queries in styles.
+    // Also set _rootMedia so custom element connectedCallbacks (which build their own isolated
+    // scopes) can resolve @--* breakpoint keys — the Jx() entry point normally does this, but
+    // the canvas bypasses it.
     renderDoc.$media = getEffectiveMedia(renderDoc.$media);
+    setRootMedia(renderDoc.$media as Record<string, string>);
 
     // Inject $head elements (link/meta/script) into document.head
     const effectiveHead = getEffectiveHead(renderDoc.$head);

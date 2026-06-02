@@ -1647,6 +1647,10 @@ export function toCSSText(rules: Record<string, unknown> | object) {
 let _rootMedia = {};
 const _elementDefs = new Map();
 
+export function setRootMedia(media: Record<string, string>) {
+  _rootMedia = media;
+}
+
 /**
  * Resolve and register $elements entries (depth-first).
  *
