@@ -1,0 +1,31 @@
+{
+  "name": "@jxsuite/figma",
+  "version": "0.1.0",
+  "description": "Figma → Jx converter and plugin — turn Figma frames into live, reactive Jx documents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jxsuite/jx.git",
+    "directory": "packages/figma"
+  },
+  "files": [
+    "src/"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./convert": "./src/convert/figma-to-jx.ts"
+  },
+  "scripts": {
+    "test": "bun test --isolate",
+    "test:coverage": "bun test --isolate --coverage",
+    "build:plugin": "bun run plugin/build.ts"
+  },
+  "dependencies": {
+    "@jxsuite/runtime": "workspace:^",
+    "@jxsuite/schema": "workspace:^"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "^20.10.6"
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "id": "1:1",
+  "name": "Pricing Card",
+  "type": "FRAME",
+  "layoutMode": "VERTICAL",
+  "itemSpacing": 16,
+  "paddingTop": 32,
+  "paddingRight": 24,
+  "paddingBottom": 32,
+  "paddingLeft": 24,
+  "counterAxisAlignItems": "CENTER",
+  "cornerRadius": 12,
+  "width": 320,
+  "height": 420,
+  "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }],
+  "children": [
+    {
+      "id": "1:2",
+      "name": "Plan",
+      "type": "TEXT",
+      "characters": "Pro",
+      "fontSize": 28,
+      "fontName": { "family": "Inter", "style": "Bold" },
+      "fontWeight": 700,
+      "textAlignHorizontal": "CENTER",
+      "fills": [{ "type": "SOLID", "color": { "r": 0.07, "g": 0.09, "b": 0.15 } }]
+    },
+    {
+      "id": "1:3",
+      "name": "Price",
+      "type": "TEXT",
+      "characters": "$29/mo",
+      "fontSize": 40,
+      "fontName": { "family": "Inter", "style": "Bold" },
+      "fontWeight": 800,
+      "textAlignHorizontal": "CENTER",
+      "fills": [{ "type": "SOLID", "color": { "r": 0.23, "g": 0.51, "b": 0.96 } }]
+    },
+    {
+      "id": "1:4",
+      "name": "Tagline",
+      "type": "TEXT",
+      "characters": "Everything you need to ship.",
+      "fontSize": 16,
+      "fontName": { "family": "Inter", "style": "Regular" },
+      "textAlignHorizontal": "CENTER",
+      "fills": [{ "type": "SOLID", "color": { "r": 0.42, "g": 0.45, "b": 0.5 } }]
+    },
+    {
+      "id": "1:5",
+      "name": "CTA",
+      "type": "FRAME",
+      "layoutMode": "HORIZONTAL",
+      "primaryAxisAlignItems": "CENTER",
+      "counterAxisAlignItems": "CENTER",
+      "paddingTop": 12,
+      "paddingRight": 24,
+      "paddingBottom": 12,
+      "paddingLeft": 24,
+      "cornerRadius": 8,
+      "fills": [{ "type": "SOLID", "color": { "r": 0.23, "g": 0.51, "b": 0.96 } }],
+      "children": [
+        {
+          "id": "1:6",
+          "name": "CTA Label",
+          "type": "TEXT",
+          "characters": "Get started",
+          "fontSize": 16,
+          "fontName": { "family": "Inter", "style": "Medium" },
+          "fontWeight": 600,
+          "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }]
+        }
+      ]
+    }
+  ]
+}
