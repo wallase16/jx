@@ -197,4 +197,69 @@ describe("serializeNode", () => {
     expect(out.constraints?.horizontal?.type).toBe("STRETCH");
     expect(out.constraints?.vertical?.type).toBe("MIN");
   });
+
+  test("serializes component fields: componentId, mainComponentName, variantProperties", () => {
+    const raw: RawFigmaNode = {
+      type: "INSTANCE",
+      componentId: "comp:123",
+      mainComponentName: "Button",
+      variantProperties: { State: "Hover" },
+      componentProperties: { Label: { type: "TEXT", value: "Click" } },
+    };
+    const out = serializeNode(raw);
+    expect(out.componentId).toBe("comp:123");
+    expect(out.mainComponentName).toBe("Button");
+    expect(out.variantProperties).toEqual({ State: "Hover" });
+    expect(out.componentProperties?.Label).toEqual({ type: "TEXT", value: "Click" });
+  });
+
+  test("serializes variantGroup with nested variant nodes", () => {
+    const raw: RawFigmaNode = {
+      type: "INSTANCE",
+      variantGroup: {
+        name: "Button",
+        componentPropertyDefinitions: {
+          Label: { type: "TEXT", defaultValue: "Button" },
+        },
+        variants: [
+          {
+            properties: { State: "Default" },
+            node: { type: "COMPONENT", name: "State=Default" },
+          },
+          {
+            properties: { State: "Hover" },
+            node: { type: "COMPONENT", name: "State=Hover" },
+          },
+        ],
+      },
+    };
+    const out = serializeNode(raw);
+    expect(out.variantGroup).toBeDefined();
+    expect(out.variantGroup?.name).toBe("Button");
+    expect(out.variantGroup?.variants).toHaveLength(2);
+    expect(out.variantGroup?.variants[0]?.properties).toEqual({ State: "Default" });
+    expect(out.variantGroup?.variants[1]?.node.name).toBe("State=Hover");
+    expect(out.variantGroup?.componentPropertyDefinitions?.Label).toEqual({
+      type: "TEXT",
+      defaultValue: "Button",
+    });
+  });
+
+  test("skips variant entries with missing properties or node", () => {
+    const raw: RawFigmaNode = {
+      type: "INSTANCE",
+      variantGroup: {
+        name: "Test",
+        variants: [
+          { properties: { A: "1" }, node: { type: "COMPONENT" } },
+          { properties: undefined as unknown as Record<string, string> } as unknown as {
+            properties: Record<string, string>;
+            node: RawFigmaNode;
+          },
+        ],
+      },
+    };
+    const out = serializeNode(raw);
+    expect(out.variantGroup?.variants).toHaveLength(1);
+  });
 });

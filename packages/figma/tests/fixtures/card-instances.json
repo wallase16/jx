@@ -1,0 +1,111 @@
+{
+  "id": "root",
+  "name": "Card Grid",
+  "type": "FRAME",
+  "layoutMode": "HORIZONTAL",
+  "layoutWrap": "WRAP",
+  "itemSpacing": 16,
+  "counterAxisSpacing": 16,
+  "children": [
+    {
+      "id": "inst-1",
+      "name": "Info Card",
+      "type": "INSTANCE",
+      "componentId": "comp:card",
+      "mainComponentName": "Card",
+      "componentProperties": {
+        "Title": { "type": "TEXT", "value": "Features" },
+        "ShowIcon": { "type": "BOOLEAN", "value": true }
+      },
+      "layoutMode": "VERTICAL",
+      "itemSpacing": 12,
+      "paddingTop": 20,
+      "paddingBottom": 20,
+      "paddingLeft": 20,
+      "paddingRight": 20,
+      "cornerRadius": 12,
+      "layoutSizingHorizontal": "FIXED",
+      "width": 280,
+      "fills": [
+        {
+          "type": "SOLID",
+          "color": { "r": 1, "g": 1, "b": 1 }
+        }
+      ],
+      "effects": [
+        {
+          "type": "DROP_SHADOW",
+          "visible": true,
+          "radius": 8,
+          "offset": { "x": 0, "y": 2 },
+          "color": { "r": 0, "g": 0, "b": 0, "a": 0.1 }
+        }
+      ],
+      "children": [
+        {
+          "type": "TEXT",
+          "characters": "Features",
+          "fontSize": 20,
+          "fontName": { "family": "Inter", "style": "Bold" },
+          "fills": [{ "type": "SOLID", "color": { "r": 0.1, "g": 0.1, "b": 0.1 } }]
+        },
+        {
+          "type": "TEXT",
+          "characters": "Discover what makes us different.",
+          "fontSize": 14,
+          "fills": [{ "type": "SOLID", "color": { "r": 0.4, "g": 0.4, "b": 0.4 } }]
+        }
+      ]
+    },
+    {
+      "id": "inst-2",
+      "name": "Info Card",
+      "type": "INSTANCE",
+      "componentId": "comp:card",
+      "mainComponentName": "Card",
+      "componentProperties": {
+        "Title": { "type": "TEXT", "value": "Pricing" },
+        "ShowIcon": { "type": "BOOLEAN", "value": false }
+      },
+      "layoutMode": "VERTICAL",
+      "itemSpacing": 12,
+      "paddingTop": 20,
+      "paddingBottom": 20,
+      "paddingLeft": 20,
+      "paddingRight": 20,
+      "cornerRadius": 12,
+      "layoutSizingHorizontal": "FIXED",
+      "width": 280,
+      "fills": [
+        {
+          "type": "SOLID",
+          "color": { "r": 1, "g": 1, "b": 1 }
+        }
+      ],
+      "effects": [
+        {
+          "type": "DROP_SHADOW",
+          "visible": true,
+          "radius": 8,
+          "offset": { "x": 0, "y": 2 },
+          "color": { "r": 0, "g": 0, "b": 0, "a": 0.1 }
+        }
+      ],
+      "children": [
+        {
+          "type": "TEXT",
+          "characters": "Pricing",
+          "fontSize": 20,
+          "fontName": { "family": "Inter", "style": "Bold" },
+          "fills": [{ "type": "SOLID", "color": { "r": 0.1, "g": 0.1, "b": 0.1 } }]
+        },
+        {
+          "type": "TEXT",
+          "characters": "Simple, transparent pricing.",
+          "fontSize": 14,
+          "fills": [{ "type": "SOLID", "color": { "r": 0.4, "g": 0.4, "b": 0.4 } }]
+        }
+      ]
+    }
+  ]
+}

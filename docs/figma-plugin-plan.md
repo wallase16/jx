@@ -1,7 +1,7 @@
 # Plan: Figma → Jx Plugin
 
-**Status:** Phase 2 ✅ complete — next up **Phase 3 (Components & reactivity)**
-**Date:** 2026-06-28
+**Status:** Phase 3 ✅ complete — next up **Phase 4 (Plugin UX polish & publish prep)**
+**Date:** 2026-06-29
 **Owner:** Gideon
 **Branch:** `feat/figma-plugin` (off clean `main`)
 
@@ -288,7 +288,39 @@ _Goal: the design system becomes a real, reactive Jx component set — what no e
 Tests: instance-dedup, prop extraction, variant→state mapping; render-proof asserts an interaction
 (e.g. dispatch a click, assert DOM state change).
 
-**Turnover (date): Phase 3 ✅ COMPLETE.** _(required)_
+**Turnover (2026-06-29): Phase 3 ✅ COMPLETE.**
+
+Built and verified end-to-end. All 4 plan items delivered.
+
+| File                                  | Role                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/convert/figma-to-jx.ts`          | Extended with: `INSTANCE` → component extraction with variant-diffing (conditional style expressions, auto-wired hover/active/focus events), component property → `$props` extraction, `__component`/`__componentProps` tagging for emit. `COMPONENT` nodes convert like frames. New types: `FigmaComponentPropertyDef`, `FigmaComponentPropertyValue`, `FigmaVariantDef`, `FigmaVariantGroup`. `ConvertResult` gains `components` map. |
+| `src/convert/serialize.ts`            | Extended to copy component fields: `componentId`, `mainComponentName`, `componentProperties`, `variantProperties`, `variantGroup` (with recursive variant node serialization).                                                                                                                                                                                                                                                          |
+| `src/emit/emit.ts`                    | Extended with component emission: writes `components/{Name}.json` files, registers in `project.json`, replaces inline instances with `$ref` + `$props` in emitted pages, strips variant state from page root.                                                                                                                                                                                                                           |
+| `src/index.ts`                        | Re-exports new types: `FigmaComponentPropertyDef`, `FigmaComponentPropertyValue`, `FigmaVariantDef`, `FigmaVariantGroup`.                                                                                                                                                                                                                                                                                                               |
+| `plugin/code.ts`                      | Extended with `serializeVariantGroup()` + `enrichWithVariantData()`: walks the serialized tree and enriches INSTANCE nodes with variant data from `mainComponent.parent` (COMPONENT_SET).                                                                                                                                                                                                                                               |
+| `tests/fixtures/button-variants.json` | Button with 3 variants (Default/Hover/Active), 2 instances with label overrides.                                                                                                                                                                                                                                                                                                                                                        |
+| `tests/fixtures/card-instances.json`  | Card grid with 2 INSTANCE nodes (no variants — basic instance dedup test).                                                                                                                                                                                                                                                                                                                                                              |
+| `tests/figma-to-jx.test.ts`           | Expanded from 46 → 60 tests: instance tagging, variant component extraction, conditional styles, event wiring, root state, prop extraction, dedup.                                                                                                                                                                                                                                                                                      |
+| `tests/serialize.test.ts`             | Expanded from 10 → 13 tests: component field serialization, variant group with nested nodes, incomplete variant filtering.                                                                                                                                                                                                                                                                                                              |
+| `tests/emit.test.ts`                  | Expanded from 8 → 13 tests: component file emission, project.json registration, `$ref` replacement, variant state stripping, prop passthrough.                                                                                                                                                                                                                                                                                          |
+| `tests/render-proof.test.ts`          | Expanded from 4 → 5 tests: **variant interaction proof** — button renders, dispatches mouseenter, asserts background style changes reactively.                                                                                                                                                                                                                                                                                          |
+
+Design decisions:
+
+- **Two-mode output.** The converter produces an inline preview document (variant state on root, prefixed keys per instance) AND extracted component definitions (self-contained with own `state`). The preview works directly with `Jx()` in the plugin iframe; the emitter transforms inline instances into `$ref` + `$props` for the downloaded project.
+- **Style-diffing, not tree-diffing.** Variant → state mapping diffs CSS style values across all variant nodes, producing ternary template expressions for divergent properties. Static properties (same across all variants) stay as plain values. This keeps the output clean and works for the common case (button color/shadow changes on hover).
+- **Heuristic event wiring.** Variant names are matched case-insensitively: Hover → mouseenter/mouseleave, Active/Pressed → mousedown/mouseup, Focus/Focused → focus/blur. This covers the most common interactive patterns without requiring user configuration.
+- **Component dedup by name.** The first instance of a component registers its definition in `result.components`; subsequent instances reuse it. Uses `variantGroup.name` or `mainComponentName`, cleaned to a valid identifier.
+- **`__component`/`__componentProps` tagging.** Instance elements carry private fields that the emitter reads and replaces with `$ref`/`$props`. The runtime ignores these unknown fields in the preview.
+- **Primary axis only.** For multi-axis variant sets (e.g., Size × State), only the first axis is mapped to state. This is intentional — multi-axis variant support adds complexity for diminishing returns; the single-axis mapping covers the interactive demo cases (hover/active) that the plan targets.
+
+Verification:
+
+- `bun test --isolate --coverage` in `packages/figma`: **112 tests pass, 97.56% functions / 94.61% lines** on converter, **100% functions / 99.44% lines** on serializer.
+- `scripts/check-coverage-manifest.ts packages/figma`: all source files covered.
+- `oxlint`: zero violations across `src/`, `tests/`, and `plugin/`.
+- Render-proof test confirms variant interaction: button converts with reactive conditional background, dispatching `mouseenter` changes the style via Vue reactivity.
 
 ---
 

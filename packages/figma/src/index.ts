@@ -6,6 +6,10 @@ export type {
   FigmaEffect,
   FigmaStroke,
   FigmaColorStop,
+  FigmaComponentPropertyDef,
+  FigmaComponentPropertyValue,
+  FigmaVariantDef,
+  FigmaVariantGroup,
   ConvertResult,
   ConvertOptions,
 } from "./convert/figma-to-jx.ts";

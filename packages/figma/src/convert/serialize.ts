@@ -57,6 +57,20 @@ export interface RawFigmaNode {
   textCase?: string | symbol;
   boundVariables?: Record<string, { type?: string; id?: string }>;
   resolvedVariables?: Record<string, { id?: string; name?: string }>;
+
+  // Component / Instance (Phase 3)
+  componentId?: string;
+  mainComponentName?: string;
+  componentProperties?: Record<string, { type?: string; value?: string | boolean }>;
+  variantProperties?: Record<string, string>;
+  variantGroup?: {
+    name?: string;
+    componentPropertyDefinitions?: Record<
+      string,
+      { type?: string; defaultValue?: string | boolean }
+    >;
+    variants?: { properties?: Record<string, string>; node?: RawFigmaNode }[];
+  };
 }
 
 function num(value: unknown): number | undefined {
@@ -211,6 +225,44 @@ export function serializeNode(node: RawFigmaNode): FigmaNode {
   }
   if (node.resolvedVariables) {
     out.resolvedVariables = node.resolvedVariables as FigmaNode["resolvedVariables"];
+  }
+
+  if (node.componentId !== undefined) {
+    out.componentId = node.componentId;
+  }
+  if (node.mainComponentName !== undefined) {
+    out.mainComponentName = node.mainComponentName;
+  }
+  if (node.componentProperties && typeof node.componentProperties === "object") {
+    out.componentProperties = node.componentProperties as FigmaNode["componentProperties"];
+  }
+  if (node.variantProperties && typeof node.variantProperties === "object") {
+    out.variantProperties = node.variantProperties;
+  }
+  if (node.variantGroup && typeof node.variantGroup === "object") {
+    const vg = node.variantGroup;
+    const serializedGroup: FigmaNode["variantGroup"] = {
+      name: vg.name ?? "",
+      variants: [],
+    };
+    if (vg.componentPropertyDefinitions) {
+      serializedGroup!.componentPropertyDefinitions =
+        vg.componentPropertyDefinitions as NonNullable<
+          NonNullable<FigmaNode["variantGroup"]>["componentPropertyDefinitions"]
+        >;
+    }
+    if (Array.isArray(vg.variants)) {
+      serializedGroup!.variants = vg.variants
+        .filter(
+          (v): v is { properties: Record<string, string>; node: RawFigmaNode } =>
+            Boolean(v.properties) && Boolean(v.node),
+        )
+        .map((v) => ({
+          properties: v.properties,
+          node: serializeNode(v.node),
+        }));
+    }
+    out.variantGroup = serializedGroup;
   }
 
   if (Array.isArray(node.children)) {

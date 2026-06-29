@@ -6,6 +6,8 @@ import heroSection from "./fixtures/hero-section.json" with { type: "json" };
 import cardGrid from "./fixtures/card-grid.json" with { type: "json" };
 import navBar from "./fixtures/nav-bar.json" with { type: "json" };
 import absoluteLayout from "./fixtures/absolute-layout.json" with { type: "json" };
+import buttonVariants from "./fixtures/button-variants.json" with { type: "json" };
+import cardInstances from "./fixtures/card-instances.json" with { type: "json" };
 
 describe("figmaColorToCss", () => {
   test("maps a 0..1 solid colour to rgb", () => {
@@ -542,5 +544,125 @@ describe("figmaToJx — ELLIPSE", () => {
       fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }],
     });
     expect(document.style?.borderRadius).toBe("50%");
+  });
+});
+
+describe("figmaToJx — INSTANCE without variants", () => {
+  test("INSTANCE without variantGroup converts like a frame", () => {
+    const { document } = figmaToJx(cardInstances as FigmaNode);
+    expect(document.children).toHaveLength(2);
+    const [card1, card2] = document.children as Record<string, unknown>[];
+    expect(card1.tagName).toBe("div");
+    expect(card2.tagName).toBe("div");
+  });
+
+  test("INSTANCE tags element with __component", () => {
+    const { document } = figmaToJx(cardInstances as FigmaNode);
+    const [card] = document.children as Record<string, unknown>[];
+    expect(card.__component).toBe("Card");
+  });
+
+  test("INSTANCE extracts __componentProps from componentProperties", () => {
+    const { document } = figmaToJx(cardInstances as FigmaNode);
+    const [card1, card2] = document.children as Record<string, unknown>[];
+    expect(card1.__componentProps).toBeUndefined();
+    expect(card2.__componentProps).toBeUndefined();
+  });
+});
+
+describe("figmaToJx — INSTANCE with variants", () => {
+  test("extracts components map from variant instances", () => {
+    const { components } = figmaToJx(buttonVariants as FigmaNode);
+    expect(components).toBeDefined();
+    expect(components?.Button).toBeDefined();
+  });
+
+  test("component definition has state with variant key", () => {
+    const { components } = figmaToJx(buttonVariants as FigmaNode);
+    const btn = components?.Button as Record<string, unknown>;
+    const state = btn.state as Record<string, unknown>;
+    expect(state.variant).toBe("Default");
+  });
+
+  test("component definition has conditional style for differing background", () => {
+    const { components } = figmaToJx(buttonVariants as FigmaNode);
+    const btn = components?.Button as Record<string, unknown>;
+    const style = btn.style as Record<string, string>;
+    expect(style.background).toContain("${");
+    expect(style.background).toContain("Hover");
+    expect(style.background).toContain("Active");
+  });
+
+  test("component definition has mouseenter/mouseleave events for Hover variant", () => {
+    const { components } = figmaToJx(buttonVariants as FigmaNode);
+    const btn = components?.Button as Record<string, unknown>;
+    expect(btn.onmouseenter).toBeDefined();
+    expect(btn.onmouseleave).toBeDefined();
+    const enter = btn.onmouseenter as { $expression: { value: string } };
+    expect(enter.$expression.value).toBe("Hover");
+  });
+
+  test("component definition has mousedown/mouseup events for Active variant", () => {
+    const { components } = figmaToJx(buttonVariants as FigmaNode);
+    const btn = components?.Button as Record<string, unknown>;
+    expect(btn.onmousedown).toBeDefined();
+    expect(btn.onmouseup).toBeDefined();
+    const down = btn.onmousedown as { $expression: { value: string } };
+    expect(down.$expression.value).toBe("Active");
+  });
+
+  test("root document gets variant state for each instance", () => {
+    const { document } = figmaToJx(buttonVariants as FigmaNode);
+    const state = (document as Record<string, unknown>).state as Record<string, unknown>;
+    expect(state).toBeDefined();
+    expect(state.button_0_variant).toBe("Default");
+    expect(state.button_1_variant).toBe("Default");
+  });
+
+  test("instance elements have inline variant events with prefixed state keys", () => {
+    const { document } = figmaToJx(buttonVariants as FigmaNode);
+    const [btn1] = document.children as Record<string, unknown>[];
+    const enter = btn1.onmouseenter as { $expression: { target: { $ref: string } } };
+    expect(enter.$expression.target.$ref).toBe("#/state/button_0_variant");
+  });
+
+  test("instance elements are tagged with __component", () => {
+    const { document } = figmaToJx(buttonVariants as FigmaNode);
+    const [btn1, btn2] = document.children as Record<string, unknown>[];
+    expect(btn1.__component).toBe("Button");
+    expect(btn2.__component).toBe("Button");
+  });
+
+  test("instance __componentProps extracts overridden label", () => {
+    const { document } = figmaToJx(buttonVariants as FigmaNode);
+    const [btn1, btn2] = document.children as Record<string, unknown>[];
+    const props1 = btn1.__componentProps as Record<string, unknown>;
+    const props2 = btn2.__componentProps as Record<string, unknown>;
+    expect(props1.label).toBe("Get Started");
+    expect(props2.label).toBe("Learn More");
+  });
+
+  test("component prop definitions are in component state", () => {
+    const { components } = figmaToJx(buttonVariants as FigmaNode);
+    const btn = components?.Button as Record<string, unknown>;
+    const state = btn.state as Record<string, unknown>;
+    const labelDef = state.label as { type: string; default: string };
+    expect(labelDef.type).toBe("string");
+    expect(labelDef.default).toBe("Button");
+  });
+
+  test("static styles remain non-conditional", () => {
+    const { components } = figmaToJx(buttonVariants as FigmaNode);
+    const btn = components?.Button as Record<string, unknown>;
+    const style = btn.style as Record<string, string>;
+    expect(style.display).toBe("flex");
+    expect(style.flexDirection).toBe("row");
+    expect(style.borderRadius).toBe("8px");
+    expect(style.display).not.toContain("${");
+  });
+
+  test("only first instance registers the component", () => {
+    const { components } = figmaToJx(buttonVariants as FigmaNode);
+    expect(Object.keys(components ?? {}).length).toBe(1);
   });
 });

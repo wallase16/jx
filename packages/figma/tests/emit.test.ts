@@ -4,6 +4,7 @@ import type { FigmaNode } from "../src/convert/figma-to-jx.ts";
 import { emitProject } from "../src/emit/emit.ts";
 import type { FileMap } from "../src/emit/emit.ts";
 import pricingCard from "./fixtures/pricing-card.json" with { type: "json" };
+import buttonVariants from "./fixtures/button-variants.json" with { type: "json" };
 
 function parse(files: FileMap, path: string): Record<string, unknown> {
   const raw = files[path];
@@ -127,5 +128,52 @@ describe("emitProject", () => {
     const files = emitProject(result);
     const project = parse(files, "project.json");
     expect(project.style).toBeUndefined();
+  });
+});
+
+describe("emitProject — components", () => {
+  test("emits component files under components/", () => {
+    const result = figmaToJx(buttonVariants as FigmaNode);
+    const files = emitProject(result);
+    expect(files["components/Button.json"]).toBeDefined();
+    const comp = JSON.parse(files["components/Button.json"] as string) as Record<string, unknown>;
+    expect(comp.tagName).toBe("div");
+    expect(comp.state).toBeDefined();
+  });
+
+  test("registers components in project.json", () => {
+    const result = figmaToJx(buttonVariants as FigmaNode);
+    const files = emitProject(result);
+    const project = parse(files, "project.json");
+    const components = project.components as Record<string, { src: string }>;
+    expect(components.Button).toBeDefined();
+    expect(components.Button.src).toBe("./components/Button.json");
+  });
+
+  test("replaces inline instances with $ref in page", () => {
+    const result = figmaToJx(buttonVariants as FigmaNode);
+    const files = emitProject(result);
+    const page = parse(files, "pages/index.json");
+    const children = page.children as Record<string, unknown>[];
+    expect(children[0].$ref).toBe("./components/Button.json");
+    expect(children[0].$props).toBeDefined();
+  });
+
+  test("strips variant state from emitted page root", () => {
+    const result = figmaToJx(buttonVariants as FigmaNode);
+    const files = emitProject(result);
+    const page = parse(files, "pages/index.json");
+    expect(page.state).toBeUndefined();
+  });
+
+  test("passes component props through $ref", () => {
+    const result = figmaToJx(buttonVariants as FigmaNode);
+    const files = emitProject(result);
+    const page = parse(files, "pages/index.json");
+    const children = page.children as Record<string, unknown>[];
+    const props1 = children[0].$props as Record<string, unknown>;
+    const props2 = children[1].$props as Record<string, unknown>;
+    expect(props1.label).toBe("Get Started");
+    expect(props2.label).toBe("Learn More");
   });
 });

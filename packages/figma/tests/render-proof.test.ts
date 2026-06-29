@@ -14,6 +14,7 @@ import type { FigmaNode } from "../src/convert/figma-to-jx.ts";
 import pricingCard from "./fixtures/pricing-card.json" with { type: "json" };
 import heroSection from "./fixtures/hero-section.json" with { type: "json" };
 import navBar from "./fixtures/nav-bar.json" with { type: "json" };
+import buttonVariants from "./fixtures/button-variants.json" with { type: "json" };
 
 beforeAll(() => {
   try {
@@ -87,5 +88,34 @@ describe("render proof", () => {
     expect(root.style.display).toBe("flex");
     expect(root.textContent).toContain("Features");
     expect(root.textContent).toContain("Sign in");
+  });
+
+  test("variant button renders and responds to mouseenter interaction", async () => {
+    setSkipServerFunctions(true);
+    const { document: doc } = figmaToJx(buttonVariants as FigmaNode);
+
+    const state = await buildScope(doc, {});
+    const container = document.createElement("div");
+    container.append(renderNode(doc, state));
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root).toBeTruthy();
+    expect(root.style.display).toBe("flex");
+
+    const btn = root.children[0] as HTMLElement;
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toContain("Button");
+
+    const initialBg = btn.style.background;
+    expect(initialBg).toBeTruthy();
+
+    btn.dispatchEvent(new Event("mouseenter"));
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+
+    const hoverBg = btn.style.background;
+    expect(hoverBg).not.toBe(initialBg);
   });
 });

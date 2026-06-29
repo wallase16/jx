@@ -1,0 +1,335 @@
+{
+  "id": "root",
+  "name": "Button Demo",
+  "type": "FRAME",
+  "layoutMode": "VERTICAL",
+  "itemSpacing": 24,
+  "paddingTop": 40,
+  "paddingBottom": 40,
+  "paddingLeft": 40,
+  "paddingRight": 40,
+  "children": [
+    {
+      "id": "instance-1",
+      "name": "Primary Button",
+      "type": "INSTANCE",
+      "componentId": "comp:button",
+      "mainComponentName": "Button",
+      "componentProperties": {
+        "Label": { "type": "TEXT", "value": "Get Started" }
+      },
+      "variantProperties": { "State": "Default" },
+      "variantGroup": {
+        "name": "Button",
+        "componentPropertyDefinitions": {
+          "Label": { "type": "TEXT", "defaultValue": "Button" }
+        },
+        "variants": [
+          {
+            "properties": { "State": "Default" },
+            "node": {
+              "type": "COMPONENT",
+              "name": "State=Default",
+              "layoutMode": "HORIZONTAL",
+              "primaryAxisAlignItems": "CENTER",
+              "counterAxisAlignItems": "CENTER",
+              "paddingLeft": 24,
+              "paddingRight": 24,
+              "paddingTop": 12,
+              "paddingBottom": 12,
+              "cornerRadius": 8,
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": { "r": 0.23, "g": 0.51, "b": 0.96 }
+                }
+              ],
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "Button",
+                  "fontSize": 16,
+                  "fontName": { "family": "Inter", "style": "SemiBold" },
+                  "fills": [
+                    {
+                      "type": "SOLID",
+                      "color": { "r": 1, "g": 1, "b": 1 }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "properties": { "State": "Hover" },
+            "node": {
+              "type": "COMPONENT",
+              "name": "State=Hover",
+              "layoutMode": "HORIZONTAL",
+              "primaryAxisAlignItems": "CENTER",
+              "counterAxisAlignItems": "CENTER",
+              "paddingLeft": 24,
+              "paddingRight": 24,
+              "paddingTop": 12,
+              "paddingBottom": 12,
+              "cornerRadius": 8,
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": { "r": 0.15, "g": 0.42, "b": 0.88 }
+                }
+              ],
+              "effects": [
+                {
+                  "type": "DROP_SHADOW",
+                  "visible": true,
+                  "radius": 12,
+                  "offset": { "x": 0, "y": 4 },
+                  "color": { "r": 0.23, "g": 0.51, "b": 0.96, "a": 0.3 }
+                }
+              ],
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "Button",
+                  "fontSize": 16,
+                  "fontName": { "family": "Inter", "style": "SemiBold" },
+                  "fills": [
+                    {
+                      "type": "SOLID",
+                      "color": { "r": 1, "g": 1, "b": 1 }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "properties": { "State": "Active" },
+            "node": {
+              "type": "COMPONENT",
+              "name": "State=Active",
+              "layoutMode": "HORIZONTAL",
+              "primaryAxisAlignItems": "CENTER",
+              "counterAxisAlignItems": "CENTER",
+              "paddingLeft": 24,
+              "paddingRight": 24,
+              "paddingTop": 12,
+              "paddingBottom": 12,
+              "cornerRadius": 8,
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": { "r": 0.1, "g": 0.35, "b": 0.8 }
+                }
+              ],
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "Button",
+                  "fontSize": 16,
+                  "fontName": { "family": "Inter", "style": "SemiBold" },
+                  "fills": [
+                    {
+                      "type": "SOLID",
+                      "color": { "r": 1, "g": 1, "b": 1 }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "layoutMode": "HORIZONTAL",
+      "primaryAxisAlignItems": "CENTER",
+      "counterAxisAlignItems": "CENTER",
+      "paddingLeft": 24,
+      "paddingRight": 24,
+      "paddingTop": 12,
+      "paddingBottom": 12,
+      "cornerRadius": 8,
+      "fills": [
+        {
+          "type": "SOLID",
+          "color": { "r": 0.23, "g": 0.51, "b": 0.96 }
+        }
+      ],
+      "children": [
+        {
+          "type": "TEXT",
+          "characters": "Get Started",
+          "fontSize": 16,
+          "fontName": { "family": "Inter", "style": "SemiBold" },
+          "fills": [
+            {
+              "type": "SOLID",
+              "color": { "r": 1, "g": 1, "b": 1 }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "instance-2",
+      "name": "Secondary Button",
+      "type": "INSTANCE",
+      "componentId": "comp:button",
+      "mainComponentName": "Button",
+      "componentProperties": {
+        "Label": { "type": "TEXT", "value": "Learn More" }
+      },
+      "variantProperties": { "State": "Default" },
+      "variantGroup": {
+        "name": "Button",
+        "componentPropertyDefinitions": {
+          "Label": { "type": "TEXT", "defaultValue": "Button" }
+        },
+        "variants": [
+          {
+            "properties": { "State": "Default" },
+            "node": {
+              "type": "COMPONENT",
+              "name": "State=Default",
+              "layoutMode": "HORIZONTAL",
+              "primaryAxisAlignItems": "CENTER",
+              "counterAxisAlignItems": "CENTER",
+              "paddingLeft": 24,
+              "paddingRight": 24,
+              "paddingTop": 12,
+              "paddingBottom": 12,
+              "cornerRadius": 8,
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": { "r": 0.23, "g": 0.51, "b": 0.96 }
+                }
+              ],
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "Button",
+                  "fontSize": 16,
+                  "fontName": { "family": "Inter", "style": "SemiBold" },
+                  "fills": [
+                    {
+                      "type": "SOLID",
+                      "color": { "r": 1, "g": 1, "b": 1 }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "properties": { "State": "Hover" },
+            "node": {
+              "type": "COMPONENT",
+              "name": "State=Hover",
+              "layoutMode": "HORIZONTAL",
+              "primaryAxisAlignItems": "CENTER",
+              "counterAxisAlignItems": "CENTER",
+              "paddingLeft": 24,
+              "paddingRight": 24,
+              "paddingTop": 12,
+              "paddingBottom": 12,
+              "cornerRadius": 8,
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": { "r": 0.15, "g": 0.42, "b": 0.88 }
+                }
+              ],
+              "effects": [
+                {
+                  "type": "DROP_SHADOW",
+                  "visible": true,
+                  "radius": 12,
+                  "offset": { "x": 0, "y": 4 },
+                  "color": { "r": 0.23, "g": 0.51, "b": 0.96, "a": 0.3 }
+                }
+              ],
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "Button",
+                  "fontSize": 16,
+                  "fontName": { "family": "Inter", "style": "SemiBold" },
+                  "fills": [
+                    {
+                      "type": "SOLID",
+                      "color": { "r": 1, "g": 1, "b": 1 }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "properties": { "State": "Active" },
+            "node": {
+              "type": "COMPONENT",
+              "name": "State=Active",
+              "layoutMode": "HORIZONTAL",
+              "primaryAxisAlignItems": "CENTER",
+              "counterAxisAlignItems": "CENTER",
+              "paddingLeft": 24,
+              "paddingRight": 24,
+              "paddingTop": 12,
+              "paddingBottom": 12,
+              "cornerRadius": 8,
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": { "r": 0.1, "g": 0.35, "b": 0.8 }
+                }
+              ],
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "Button",
+                  "fontSize": 16,
+                  "fontName": { "family": "Inter", "style": "SemiBold" },
+                  "fills": [
+                    {
+                      "type": "SOLID",
+                      "color": { "r": 1, "g": 1, "b": 1 }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "layoutMode": "HORIZONTAL",
+      "primaryAxisAlignItems": "CENTER",
+      "counterAxisAlignItems": "CENTER",
+      "paddingLeft": 24,
+      "paddingRight": 24,
+      "paddingTop": 12,
+      "paddingBottom": 12,
+      "cornerRadius": 8,
+      "fills": [
+        {
+          "type": "SOLID",
+          "color": { "r": 0.23, "g": 0.51, "b": 0.96 }
+        }
+      ],
+      "children": [
+        {
+          "type": "TEXT",
+          "characters": "Learn More",
+          "fontSize": 16,
+          "fontName": { "family": "Inter", "style": "SemiBold" },
+          "fills": [
+            {
+              "type": "SOLID",
+              "color": { "r": 1, "g": 1, "b": 1 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

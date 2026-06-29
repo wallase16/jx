@@ -29,6 +29,75 @@ interface FigmaApi {
 declare const figma: FigmaApi;
 declare const __html__: string;
 
+interface RawComponentPropertyDef {
+  type?: string;
+  defaultValue?: string | boolean;
+}
+
+interface RawVariantComponent {
+  type?: string;
+  variantProperties?: Record<string, string>;
+  children?: RawFigmaNode[];
+  [key: string]: unknown;
+}
+
+interface MainComponentRef {
+  name?: string;
+  parent?: {
+    type?: string;
+    name?: string;
+    componentPropertyDefinitions?: Record<string, RawComponentPropertyDef>;
+    children?: RawVariantComponent[];
+  };
+}
+
+function serializeVariantGroup(
+  node: RawFigmaNode & {
+    mainComponent?: MainComponentRef;
+    componentProperties?: Record<string, { type?: string; value?: string | boolean }>;
+    variantProperties?: Record<string, string>;
+    componentId?: string;
+  },
+): Partial<RawFigmaNode> {
+  const extra: Partial<RawFigmaNode> = {};
+
+  if (node.componentId) {
+    extra.componentId = node.componentId;
+  }
+  if (node.componentProperties) {
+    extra.componentProperties = node.componentProperties;
+  }
+  if (node.variantProperties) {
+    extra.variantProperties = node.variantProperties;
+  }
+
+  const mc = node.mainComponent;
+  if (!mc) {
+    return extra;
+  }
+
+  extra.mainComponentName = mc.name ?? node.name;
+
+  const { parent } = mc;
+  if (parent?.type === "COMPONENT_SET" && Array.isArray(parent.children)) {
+    extra.variantGroup = {
+      name: parent.name ?? mc.name ?? "",
+      componentPropertyDefinitions: parent.componentPropertyDefinitions,
+      variants: parent.children
+        .filter(
+          (child): child is RawVariantComponent & { variantProperties: Record<string, string> } =>
+            Boolean(child.variantProperties),
+        )
+        .map((child) => ({
+          properties: child.variantProperties,
+          node: serializeNode(child as unknown as RawFigmaNode),
+        })),
+    };
+  }
+
+  return extra;
+}
+
 function collectImageRefs(node: RawFigmaNode): string[] {
   const refs: string[] = [];
   if (Array.isArray(node.fills)) {
@@ -46,6 +115,27 @@ function collectImageRefs(node: RawFigmaNode): string[] {
   return refs;
 }
 
+function enrichWithVariantData(
+  node: RawFigmaNode & {
+    mainComponent?: MainComponentRef;
+    componentProperties?: Record<string, { type?: string; value?: string | boolean }>;
+    variantProperties?: Record<string, string>;
+    componentId?: string;
+  },
+  serialized: ReturnType<typeof serializeNode>,
+): void {
+  Object.assign(serialized, serializeVariantGroup(node));
+  if (Array.isArray(node.children) && Array.isArray(serialized.children)) {
+    for (let i = 0; i < node.children.length; i += 1) {
+      const rawChild = node.children[i] as typeof node | undefined;
+      const serChild = serialized.children[i];
+      if (rawChild && serChild) {
+        enrichWithVariantData(rawChild, serChild);
+      }
+    }
+  }
+}
+
 function postSelection(): void {
   const [selected] = figma.currentPage.selection;
   if (!selected) {
@@ -54,6 +144,7 @@ function postSelection(): void {
     return;
   }
   const node = serializeNode(selected);
+  enrichWithVariantData(selected as Parameters<typeof enrichWithVariantData>[0], node);
   const imageRefs = [...new Set(collectImageRefs(selected))];
   // oxlint-disable-next-line require-post-message-target-origin -- Figma's plugin postMessage takes no targetOrigin.
   figma.ui.postMessage({ type: "node", node, imageRefs });

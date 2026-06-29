@@ -131,6 +131,34 @@ export interface FigmaNode {
 
   // Vectors
   svgContent?: string;
+
+  // Component / Instance (Phase 3)
+  componentId?: string;
+  mainComponentName?: string;
+  componentProperties?: Record<string, FigmaComponentPropertyValue>;
+  variantProperties?: Record<string, string>;
+  variantGroup?: FigmaVariantGroup;
+}
+
+export interface FigmaComponentPropertyDef {
+  type: "TEXT" | "BOOLEAN" | "INSTANCE_SWAP" | "VARIANT";
+  defaultValue?: string | boolean;
+}
+
+export interface FigmaComponentPropertyValue {
+  type: string;
+  value: string | boolean;
+}
+
+export interface FigmaVariantDef {
+  properties: Record<string, string>;
+  node: FigmaNode;
+}
+
+export interface FigmaVariantGroup {
+  name: string;
+  componentPropertyDefinitions?: Record<string, FigmaComponentPropertyDef>;
+  variants: FigmaVariantDef[];
 }
 
 export interface ConvertOptions {
@@ -141,6 +169,14 @@ export interface ConvertResult {
   document: JxDocument;
   nodeCount: number;
   tokens?: Record<string, string>;
+  components?: Record<string, JxDocument>;
+}
+
+interface ConvertContext {
+  tokens: Record<string, string>;
+  components: Record<string, JxDocument>;
+  rootState: Record<string, unknown>;
+  instanceCounter: number;
 }
 
 const PRIMARY_ALIGN: Record<string, string> = {
@@ -257,7 +293,7 @@ function resolveStrokes(node: FigmaNode): Partial<JxStyle> {
     return style;
   }
   const [stroke] = visible;
-  if (!stroke.color) {
+  if (!stroke?.color) {
     return style;
   }
   const color = figmaColorToCss(stroke.color, stroke.opacity ?? 1);
@@ -516,18 +552,14 @@ function textTag(node: FigmaNode): string {
   return "p";
 }
 
-function isAbsoluteChild(node: FigmaNode, parent?: FigmaNode): boolean {
+function isAbsoluteChild(_node: FigmaNode, parent?: FigmaNode): boolean {
   if (!parent) {
     return false;
   }
   return !parent.layoutMode || parent.layoutMode === "NONE";
 }
 
-function convertNode(
-  node: FigmaNode,
-  tokens: Record<string, string>,
-  parent?: FigmaNode,
-): JxElement | null {
+function convertNode(node: FigmaNode, ctx: ConvertContext, parent?: FigmaNode): JxElement | null {
   if (node.visible === false) {
     return null;
   }
@@ -535,7 +567,7 @@ function convertNode(
   switch (node.type) {
     case "TEXT": {
       const el: JxElement = { tagName: textTag(node), textContent: node.characters ?? "" };
-      const style = textStyle(node, tokens);
+      const style = textStyle(node, ctx.tokens);
       if (isAbsoluteChild(node, parent)) {
         applyAbsolutePosition(style, node);
       }
@@ -572,7 +604,7 @@ function convertNode(
         return el;
       }
       const el: JxElement = { tagName: "div" };
-      const style = containerStyle(node, tokens);
+      const style = containerStyle(node, ctx.tokens);
       if (node.width) {
         style.width = `${r2(node.width)}px`;
       }
@@ -619,7 +651,7 @@ function convertNode(
         return el;
       }
       const el: JxElement = { tagName: "div" };
-      const style = containerStyle(node, tokens);
+      const style = containerStyle(node, ctx.tokens);
       if (!style.width && node.width) {
         style.width = `${r2(node.width)}px`;
       }
@@ -637,39 +669,293 @@ function convertNode(
       }
       return el;
     }
+    case "INSTANCE": {
+      return convertInstance(node, ctx, parent);
+    }
+    case "COMPONENT": {
+      return convertFrameLike(node, ctx, parent);
+    }
     default: {
-      const el: JxElement = { tagName: "div" };
-      const style = containerStyle(node, tokens);
-
-      const imageFill = hasImageFill(node.fills);
-      if (imageFill) {
-        const ref = imageFill.imageRef ?? "placeholder";
-        style.backgroundImage = `url(images/${ref}.png)`;
-        style.backgroundSize = imageFill.scaleMode === "FIT" ? "contain" : "cover";
-        style.backgroundPosition = "center";
-      }
-
-      if (isAbsoluteChild(node, parent) && parent) {
-        applyAbsolutePosition(style, node);
-      }
-
-      if (node.children?.length && (!node.layoutMode || node.layoutMode === "NONE")) {
-        style.position ??= "relative";
-      }
-
-      if (Object.keys(style).length > 0) {
-        el.style = style;
-      }
-      const children = (node.children ?? [])
-        .map((child) => convertNode(child, tokens, node))
-        .filter((c): c is JxElement => c !== null);
-      if (children.length > 0) {
-        el.children = children;
-      }
-      return el;
+      return convertFrameLike(node, ctx, parent);
     }
   }
 }
+
+function convertFrameLike(node: FigmaNode, ctx: ConvertContext, parent?: FigmaNode): JxElement {
+  const el: JxElement = { tagName: "div" };
+  const style = containerStyle(node, ctx.tokens);
+
+  const imageFill = hasImageFill(node.fills);
+  if (imageFill) {
+    const ref = imageFill.imageRef ?? "placeholder";
+    style.backgroundImage = `url(images/${ref}.png)`;
+    style.backgroundSize = imageFill.scaleMode === "FIT" ? "contain" : "cover";
+    style.backgroundPosition = "center";
+  }
+
+  if (isAbsoluteChild(node, parent) && parent) {
+    applyAbsolutePosition(style, node);
+  }
+
+  if (node.children?.length && (!node.layoutMode || node.layoutMode === "NONE")) {
+    style.position ??= "relative";
+  }
+
+  if (Object.keys(style).length > 0) {
+    el.style = style;
+  }
+  const children = (node.children ?? [])
+    .map((child) => convertNode(child, ctx, node))
+    .filter((c): c is JxElement => c !== null);
+  if (children.length > 0) {
+    el.children = children;
+  }
+  return el;
+}
+
+// ── Component / Instance conversion (Phase 3) ──────────────────────────────
+
+function cleanComponentName(name: string): string {
+  return name
+    .replaceAll(/[/\\]/g, "-")
+    .replaceAll(/[^a-zA-Z\d-]/g, "")
+    .replaceAll(/-+/g, "-")
+    .replaceAll(/^-|-$/g, "")
+    .replace(/^[a-z]/, (c) => c.toUpperCase());
+}
+
+function buildSetStateExpr(stateKey: string, value: string): Record<string, unknown> {
+  return {
+    $expression: {
+      operator: "=",
+      target: { $ref: `#/state/${stateKey}` },
+      value,
+    },
+  };
+}
+
+function escapeQuote(s: string): string {
+  return s.replaceAll("'", String.raw`\'`);
+}
+
+function buildConditionalValue(
+  stateKey: string,
+  values: Map<string, string>,
+  defaultVariant: string,
+): string {
+  const entries = [...values.entries()];
+  const defaultVal = values.get(defaultVariant) ?? entries[0]?.[1] ?? "";
+
+  const nonDefault = entries.filter(([variant]) => variant !== defaultVariant);
+  if (nonDefault.length === 0) {
+    return defaultVal;
+  }
+
+  let expr = "";
+  for (const [variant, val] of nonDefault) {
+    expr += `state.${stateKey} === '${variant}' ? '${escapeQuote(val)}' : `;
+  }
+  expr += `'${escapeQuote(defaultVal)}'`;
+  return `\${${expr}}`;
+}
+
+function diffVariantStyles(
+  variantStyles: Map<string, JxStyle>,
+  defaultVariant: string,
+  stateKey: string,
+): JxStyle {
+  const allKeys = new Set<string>();
+  for (const style of variantStyles.values()) {
+    for (const key of Object.keys(style)) {
+      allKeys.add(key);
+    }
+  }
+
+  const merged: JxStyle = {};
+  for (const key of allKeys) {
+    const perVariant = new Map<string, string>();
+    for (const [variant, style] of variantStyles) {
+      const val = style[key];
+      if (val !== undefined) {
+        perVariant.set(variant, typeof val === "number" ? String(val) : (val as string));
+      }
+    }
+
+    const uniqueVals = new Set(perVariant.values());
+    if (uniqueVals.size <= 1) {
+      const [first] = perVariant.values();
+      if (first !== undefined) {
+        merged[key] = first;
+      }
+    } else {
+      for (const [variant] of variantStyles) {
+        if (!perVariant.has(variant)) {
+          perVariant.set(variant, "none");
+        }
+      }
+      merged[key] = buildConditionalValue(stateKey, perVariant, defaultVariant);
+    }
+  }
+
+  return merged;
+}
+
+// oxlint-disable-next-line unicorn/prefer-add-event-listener -- building JSON event descriptors, not DOM elements
+function wireVariantEvents(
+  stateKey: string,
+  variantValues: string[],
+  defaultVariant: string,
+): Record<string, unknown> {
+  const events: Record<string, unknown> = {};
+  const lower = variantValues.map((v) => v.toLowerCase());
+  const hasHover = lower.includes("hover");
+  const activeVariant = variantValues.find((v) => /^(active|pressed)$/i.test(v));
+  const focusVariant = variantValues.find((v) => /^focus(?:ed)?$/i.test(v));
+
+  if (hasHover) {
+    events["onmouseenter"] = buildSetStateExpr(stateKey, "Hover");
+    events["onmouseleave"] = buildSetStateExpr(stateKey, defaultVariant);
+  }
+
+  if (activeVariant) {
+    events["onmousedown"] = buildSetStateExpr(stateKey, activeVariant);
+    events["onmouseup"] = buildSetStateExpr(stateKey, hasHover ? "Hover" : defaultVariant);
+  }
+
+  if (focusVariant) {
+    events["onfocus"] = buildSetStateExpr(stateKey, focusVariant);
+    events["onblur"] = buildSetStateExpr(stateKey, defaultVariant);
+  }
+
+  return events;
+}
+
+function extractComponentProps(
+  node: FigmaNode,
+  variantGroup: FigmaVariantGroup,
+): { propDefs: Record<string, unknown>; propValues: Record<string, unknown> } {
+  const propDefs: Record<string, unknown> = {};
+  const propValues: Record<string, unknown> = {};
+  const cpDefs = variantGroup.componentPropertyDefinitions;
+  if (!cpDefs) {
+    return { propDefs, propValues };
+  }
+
+  for (const [rawName, def] of Object.entries(cpDefs)) {
+    const propKey = rawName.replaceAll(/\s+/g, "_").replace(/#\d+$/, "").toLowerCase();
+    if (def.type === "TEXT") {
+      propDefs[propKey] = { type: "string", default: def.defaultValue ?? "" };
+      const override = node.componentProperties?.[rawName];
+      if (override && typeof override.value === "string") {
+        propValues[propKey] = override.value;
+      }
+    } else if (def.type === "BOOLEAN") {
+      propDefs[propKey] = { type: "boolean", default: def.defaultValue ?? false };
+      const override = node.componentProperties?.[rawName];
+      if (override && typeof override.value === "boolean") {
+        propValues[propKey] = override.value;
+      }
+    }
+  }
+
+  return { propDefs, propValues };
+}
+
+function convertInstance(
+  node: FigmaNode,
+  ctx: ConvertContext,
+  parent?: FigmaNode,
+): JxElement | null {
+  if (!node.variantGroup || node.variantGroup.variants.length < 2) {
+    const el = convertFrameLike(node, ctx, parent);
+    if (node.mainComponentName) {
+      const compName = cleanComponentName(node.mainComponentName);
+      const extra = el as Record<string, unknown>;
+      extra.__component = compName;
+      if (node.componentProperties && node.variantGroup?.componentPropertyDefinitions) {
+        const { propValues } = extractComponentProps(node, {
+          name: compName,
+          variants: [],
+          componentPropertyDefinitions: node.variantGroup.componentPropertyDefinitions,
+        });
+        if (Object.keys(propValues).length > 0) {
+          extra.__componentProps = propValues;
+        }
+      }
+    }
+    return el;
+  }
+
+  const vg = node.variantGroup;
+  const compName = cleanComponentName(vg.name || node.mainComponentName || "Component");
+  const [firstVariant] = vg.variants;
+  if (!firstVariant) {
+    return convertFrameLike(node, ctx, parent);
+  }
+  const [primaryAxis] = Object.keys(firstVariant.properties);
+  if (!primaryAxis) {
+    return convertFrameLike(node, ctx, parent);
+  }
+  const defaultVariant =
+    node.variantProperties?.[primaryAxis] ?? firstVariant.properties[primaryAxis] ?? "Default";
+  const stateKey = `${compName.toLowerCase()}_${ctx.instanceCounter}_variant`;
+  ctx.instanceCounter += 1;
+
+  const variantStyles = new Map<string, JxStyle>();
+  let baseEl: JxElement = { tagName: "div" };
+
+  for (const variant of vg.variants) {
+    const value = variant.properties[primaryAxis] ?? "";
+    const converted = convertFrameLike(variant.node, ctx);
+    if (value === defaultVariant) {
+      baseEl = converted;
+    }
+    variantStyles.set(value, converted.style ?? {});
+  }
+
+  const mergedStyle = diffVariantStyles(variantStyles, defaultVariant, stateKey);
+
+  if (isAbsoluteChild(node, parent) && parent) {
+    applyAbsolutePosition(mergedStyle, node);
+  }
+
+  const el: JxElement = { ...baseEl, style: mergedStyle };
+  const variantValues = vg.variants.map((v) => v.properties[primaryAxis] ?? "");
+  const events = wireVariantEvents(stateKey, variantValues, defaultVariant);
+  Object.assign(el, events);
+
+  ctx.rootState[stateKey] = defaultVariant;
+
+  const { propDefs, propValues } = extractComponentProps(node, vg);
+
+  const componentStateKey = "variant";
+  const componentStyle = diffVariantStyles(variantStyles, defaultVariant, componentStateKey);
+  const componentEvents = wireVariantEvents(componentStateKey, variantValues, defaultVariant);
+
+  const componentState: Record<string, unknown> = { [componentStateKey]: defaultVariant };
+  for (const [key, def] of Object.entries(propDefs)) {
+    componentState[key] = def;
+  }
+
+  if (!ctx.components[compName]) {
+    ctx.components[compName] = {
+      ...baseEl,
+      style: componentStyle,
+      ...componentEvents,
+      state: componentState,
+    } as JxDocument;
+  }
+
+  const extra = el as Record<string, unknown>;
+  extra.__component = compName;
+  if (Object.keys(propValues).length > 0) {
+    extra.__componentProps = propValues;
+  }
+
+  return el;
+}
+
+// ── Tree utilities ──────────────────────────────────────────────────────────
 
 function countNodes(el: JxElement | string): number {
   if (typeof el === "string") {
@@ -685,12 +971,25 @@ function countNodes(el: JxElement | string): number {
 }
 
 export function figmaToJx(root: FigmaNode, _options?: ConvertOptions): ConvertResult {
-  const tokens: Record<string, string> = {};
-  const converted = convertNode(root, tokens) ?? { tagName: "div" };
+  const ctx: ConvertContext = {
+    tokens: {},
+    components: {},
+    rootState: {},
+    instanceCounter: 0,
+  };
+  const converted = convertNode(root, ctx) ?? { tagName: "div" };
   const document = converted as JxDocument;
+
+  if (Object.keys(ctx.rootState).length > 0) {
+    (document as Record<string, unknown>).state = ctx.rootState;
+  }
+
   const result: ConvertResult = { document, nodeCount: countNodes(document) };
-  if (Object.keys(tokens).length > 0) {
-    result.tokens = tokens;
+  if (Object.keys(ctx.tokens).length > 0) {
+    result.tokens = ctx.tokens;
+  }
+  if (Object.keys(ctx.components).length > 0) {
+    result.components = ctx.components;
   }
   return result;
 }
