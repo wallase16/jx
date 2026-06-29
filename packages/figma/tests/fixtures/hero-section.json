@@ -1,0 +1,162 @@
+{
+  "id": "2:1",
+  "name": "Hero Section",
+  "type": "FRAME",
+  "layoutMode": "VERTICAL",
+  "layoutSizingHorizontal": "FILL",
+  "layoutSizingVertical": "HUG",
+  "itemSpacing": 24,
+  "paddingTop": 64,
+  "paddingRight": 48,
+  "paddingBottom": 64,
+  "paddingLeft": 48,
+  "counterAxisAlignItems": "CENTER",
+  "clipsContent": true,
+  "width": 1280,
+  "height": 600,
+  "fills": [
+    {
+      "type": "GRADIENT_LINEAR",
+      "gradientStops": [
+        { "position": 0, "color": { "r": 0.05, "g": 0.05, "b": 0.15 } },
+        { "position": 1, "color": { "r": 0.15, "g": 0.1, "b": 0.35 } }
+      ],
+      "gradientTransform": { "0": [0, 1, 0], "1": [-1, 0, 1] }
+    }
+  ],
+  "effects": [
+    {
+      "type": "INNER_SHADOW",
+      "visible": true,
+      "radius": 40,
+      "offset": { "x": 0, "y": -10 },
+      "color": { "r": 0, "g": 0, "b": 0, "a": 0.25 }
+    }
+  ],
+  "children": [
+    {
+      "id": "2:2",
+      "name": "Badge",
+      "type": "FRAME",
+      "layoutMode": "HORIZONTAL",
+      "paddingTop": 6,
+      "paddingRight": 16,
+      "paddingBottom": 6,
+      "paddingLeft": 16,
+      "cornerRadius": 100,
+      "fills": [{ "type": "SOLID", "color": { "r": 0.3, "g": 0.2, "b": 0.8 }, "opacity": 0.2 }],
+      "strokes": [{ "type": "SOLID", "color": { "r": 0.5, "g": 0.4, "b": 1 } }],
+      "strokeWeight": 1,
+      "strokeAlign": "INSIDE",
+      "children": [
+        {
+          "id": "2:3",
+          "name": "Badge Text",
+          "type": "TEXT",
+          "characters": "New Release",
+          "fontSize": 14,
+          "fontName": { "family": "Inter", "style": "SemiBold" },
+          "letterSpacing": { "value": 5, "unit": "PERCENT" },
+          "textCase": "UPPER",
+          "fills": [{ "type": "SOLID", "color": { "r": 0.7, "g": 0.6, "b": 1 } }]
+        }
+      ]
+    },
+    {
+      "id": "2:4",
+      "name": "Headline",
+      "type": "TEXT",
+      "characters": "Design to code in seconds",
+      "fontSize": 56,
+      "fontName": { "family": "Inter", "style": "Bold" },
+      "fontWeight": 700,
+      "textAlignHorizontal": "CENTER",
+      "lineHeight": { "value": 64, "unit": "PIXELS" },
+      "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }]
+    },
+    {
+      "id": "2:5",
+      "name": "Subheadline",
+      "type": "TEXT",
+      "characters": "Turn any Figma frame into a live, reactive web component.",
+      "fontSize": 20,
+      "fontName": { "family": "Inter", "style": "Regular" },
+      "textAlignHorizontal": "CENTER",
+      "lineHeight": { "value": 150, "unit": "PERCENT" },
+      "textDecoration": "NONE",
+      "fills": [{ "type": "SOLID", "color": { "r": 0.7, "g": 0.7, "b": 0.8 } }]
+    },
+    {
+      "id": "2:6",
+      "name": "CTA Row",
+      "type": "FRAME",
+      "layoutMode": "HORIZONTAL",
+      "itemSpacing": 16,
+      "counterAxisAlignItems": "CENTER",
+      "children": [
+        {
+          "id": "2:7",
+          "name": "Primary CTA",
+          "type": "FRAME",
+          "layoutMode": "HORIZONTAL",
+          "primaryAxisAlignItems": "CENTER",
+          "counterAxisAlignItems": "CENTER",
+          "paddingTop": 14,
+          "paddingRight": 32,
+          "paddingBottom": 14,
+          "paddingLeft": 32,
+          "cornerRadius": 8,
+          "fills": [{ "type": "SOLID", "color": { "r": 0.4, "g": 0.3, "b": 1 } }],
+          "effects": [
+            {
+              "type": "DROP_SHADOW",
+              "visible": true,
+              "radius": 20,
+              "offset": { "x": 0, "y": 4 },
+              "color": { "r": 0.4, "g": 0.3, "b": 1, "a": 0.4 },
+              "spread": 0
+            }
+          ],
+          "children": [
+            {
+              "id": "2:8",
+              "name": "CTA Label",
+              "type": "TEXT",
+              "characters": "Get started free",
+              "fontSize": 16,
+              "fontName": { "family": "Inter", "style": "SemiBold" },
+              "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }]
+            }
+          ]
+        },
+        {
+          "id": "2:9",
+          "name": "Secondary CTA",
+          "type": "FRAME",
+          "layoutMode": "HORIZONTAL",
+          "primaryAxisAlignItems": "CENTER",
+          "counterAxisAlignItems": "CENTER",
+          "paddingTop": 14,
+          "paddingRight": 32,
+          "paddingBottom": 14,
+          "paddingLeft": 32,
+          "cornerRadius": 8,
+          "strokes": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 }, "opacity": 0.3 }],
+          "strokeWeight": 1,
+          "children": [
+            {
+              "id": "2:10",
+              "name": "CTA Label",
+              "type": "TEXT",
+              "characters": "Watch demo",
+              "fontSize": 16,
+              "fontName": { "family": "Inter", "style": "Medium" },
+              "textDecoration": "UNDERLINE",
+              "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

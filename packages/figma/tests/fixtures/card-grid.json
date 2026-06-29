@@ -1,0 +1,163 @@
+{
+  "id": "3:1",
+  "name": "Card Grid",
+  "type": "FRAME",
+  "layoutMode": "HORIZONTAL",
+  "layoutWrap": "WRAP",
+  "itemSpacing": 24,
+  "counterAxisSpacing": 32,
+  "layoutSizingHorizontal": "FILL",
+  "layoutSizingVertical": "HUG",
+  "paddingTop": 40,
+  "paddingRight": 40,
+  "paddingBottom": 40,
+  "paddingLeft": 40,
+  "fills": [{ "type": "SOLID", "color": { "r": 0.97, "g": 0.97, "b": 0.98 } }],
+  "children": [
+    {
+      "id": "3:2",
+      "name": "Card 1",
+      "type": "FRAME",
+      "layoutMode": "VERTICAL",
+      "itemSpacing": 16,
+      "paddingTop": 0,
+      "paddingRight": 0,
+      "paddingBottom": 24,
+      "paddingLeft": 0,
+      "layoutSizingHorizontal": "FIXED",
+      "width": 360,
+      "cornerRadius": 16,
+      "clipsContent": true,
+      "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }],
+      "effects": [
+        {
+          "type": "DROP_SHADOW",
+          "visible": true,
+          "radius": 12,
+          "offset": { "x": 0, "y": 2 },
+          "color": { "r": 0, "g": 0, "b": 0, "a": 0.08 },
+          "spread": 0
+        }
+      ],
+      "children": [
+        {
+          "id": "3:3",
+          "name": "Card Image",
+          "type": "RECTANGLE",
+          "width": 360,
+          "height": 200,
+          "layoutSizingHorizontal": "FILL",
+          "fills": [
+            {
+              "type": "IMAGE",
+              "imageRef": "abc123",
+              "scaleMode": "FILL"
+            }
+          ]
+        },
+        {
+          "id": "3:4",
+          "name": "Card Content",
+          "type": "FRAME",
+          "layoutMode": "VERTICAL",
+          "itemSpacing": 8,
+          "paddingLeft": 24,
+          "paddingRight": 24,
+          "children": [
+            {
+              "id": "3:5",
+              "name": "Card Title",
+              "type": "TEXT",
+              "characters": "Getting Started",
+              "fontSize": 20,
+              "fontName": { "family": "Inter", "style": "Bold" },
+              "fontWeight": 700,
+              "fills": [{ "type": "SOLID", "color": { "r": 0.07, "g": 0.09, "b": 0.15 } }]
+            },
+            {
+              "id": "3:6",
+              "name": "Card Description",
+              "type": "TEXT",
+              "characters": "Learn how to set up your first project in under five minutes.",
+              "fontSize": 14,
+              "fontName": { "family": "Inter", "style": "Regular" },
+              "lineHeight": { "value": 150, "unit": "PERCENT" },
+              "fills": [{ "type": "SOLID", "color": { "r": 0.4, "g": 0.42, "b": 0.48 } }]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3:7",
+      "name": "Card 2",
+      "type": "FRAME",
+      "layoutMode": "VERTICAL",
+      "itemSpacing": 16,
+      "paddingBottom": 24,
+      "layoutSizingHorizontal": "FIXED",
+      "width": 360,
+      "cornerRadius": 16,
+      "clipsContent": true,
+      "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }],
+      "effects": [
+        {
+          "type": "DROP_SHADOW",
+          "visible": true,
+          "radius": 12,
+          "offset": { "x": 0, "y": 2 },
+          "color": { "r": 0, "g": 0, "b": 0, "a": 0.08 },
+          "spread": 0
+        }
+      ],
+      "children": [
+        {
+          "id": "3:8",
+          "name": "Card Image 2",
+          "type": "RECTANGLE",
+          "width": 360,
+          "height": 200,
+          "layoutSizingHorizontal": "FILL",
+          "fills": [
+            {
+              "type": "IMAGE",
+              "imageRef": "def456",
+              "scaleMode": "FIT"
+            }
+          ]
+        },
+        {
+          "id": "3:9",
+          "name": "Card Content 2",
+          "type": "FRAME",
+          "layoutMode": "VERTICAL",
+          "itemSpacing": 8,
+          "paddingLeft": 24,
+          "paddingRight": 24,
+          "children": [
+            {
+              "id": "3:10",
+              "name": "Card Title 2",
+              "type": "TEXT",
+              "characters": "Advanced Guide",
+              "fontSize": 20,
+              "fontName": { "family": "Inter", "style": "Bold" },
+              "fontWeight": 700,
+              "fills": [{ "type": "SOLID", "color": { "r": 0.07, "g": 0.09, "b": 0.15 } }]
+            },
+            {
+              "id": "3:11",
+              "name": "Card Description 2",
+              "type": "TEXT",
+              "characters": "Deep dive into components, variants, and reactive state.",
+              "fontSize": 14,
+              "fontName": { "family": "Inter", "style": "Regular" },
+              "lineHeight": { "value": 150, "unit": "PERCENT" },
+              "fills": [{ "type": "SOLID", "color": { "r": 0.4, "g": 0.42, "b": 0.48 } }]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

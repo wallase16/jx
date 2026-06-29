@@ -1,0 +1,81 @@
+{
+  "id": "5:1",
+  "name": "Absolute Container",
+  "type": "FRAME",
+  "layoutMode": "NONE",
+  "width": 400,
+  "height": 300,
+  "fills": [{ "type": "SOLID", "color": { "r": 0.95, "g": 0.95, "b": 0.97 } }],
+  "children": [
+    {
+      "id": "5:2",
+      "name": "Badge",
+      "type": "FRAME",
+      "layoutMode": "HORIZONTAL",
+      "x": 16,
+      "y": 16,
+      "width": 80,
+      "height": 28,
+      "paddingLeft": 8,
+      "paddingRight": 8,
+      "cornerRadius": 4,
+      "primaryAxisAlignItems": "CENTER",
+      "counterAxisAlignItems": "CENTER",
+      "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 0.2, "b": 0.2 } }],
+      "children": [
+        {
+          "id": "5:3",
+          "name": "Badge Label",
+          "type": "TEXT",
+          "characters": "NEW",
+          "fontSize": 12,
+          "fontName": { "family": "Inter", "style": "Bold" },
+          "fontWeight": 700,
+          "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }]
+        }
+      ]
+    },
+    {
+      "id": "5:4",
+      "name": "Centered Text",
+      "type": "TEXT",
+      "x": 100,
+      "y": 130,
+      "width": 200,
+      "height": 40,
+      "characters": "Hello World",
+      "fontSize": 24,
+      "fontName": { "family": "Inter", "style": "Bold Italic" },
+      "textAlignHorizontal": "CENTER",
+      "fills": [{ "type": "SOLID", "color": { "r": 0.1, "g": 0.1, "b": 0.15 } }]
+    },
+    {
+      "id": "5:5",
+      "name": "Rotated Box",
+      "type": "RECTANGLE",
+      "x": 300,
+      "y": 200,
+      "width": 60,
+      "height": 60,
+      "rotation": 45,
+      "cornerRadius": 8,
+      "fills": [{ "type": "SOLID", "color": { "r": 0.4, "g": 0.3, "b": 1 } }]
+    },
+    {
+      "id": "5:6",
+      "name": "Ellipse Avatar",
+      "type": "ELLIPSE",
+      "x": 20,
+      "y": 220,
+      "width": 48,
+      "height": 48,
+      "fills": [
+        {
+          "type": "IMAGE",
+          "imageRef": "avatar-001",
+          "scaleMode": "FILL"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,104 @@
+{
+  "id": "4:1",
+  "name": "Nav Bar",
+  "type": "FRAME",
+  "layoutMode": "HORIZONTAL",
+  "layoutSizingHorizontal": "FILL",
+  "layoutSizingVertical": "FIXED",
+  "primaryAxisAlignItems": "SPACE_BETWEEN",
+  "counterAxisAlignItems": "CENTER",
+  "paddingTop": 0,
+  "paddingRight": 32,
+  "paddingBottom": 0,
+  "paddingLeft": 32,
+  "width": 1440,
+  "height": 64,
+  "minHeight": 48,
+  "maxWidth": 1440,
+  "fills": [
+    { "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } },
+    { "type": "SOLID", "color": { "r": 0, "g": 0, "b": 0 }, "opacity": 0.02 }
+  ],
+  "strokes": [{ "type": "SOLID", "color": { "r": 0.9, "g": 0.9, "b": 0.92 } }],
+  "strokeWeight": 1,
+  "strokeAlign": "INSIDE",
+  "effects": [
+    {
+      "type": "BACKGROUND_BLUR",
+      "visible": true,
+      "radius": 12
+    }
+  ],
+  "children": [
+    {
+      "id": "4:2",
+      "name": "Logo",
+      "type": "VECTOR",
+      "width": 32,
+      "height": 32,
+      "svgContent": "<path d=\"M16 0L32 32H0Z\" fill=\"#6B4EFF\"/>"
+    },
+    {
+      "id": "4:3",
+      "name": "Nav Links",
+      "type": "FRAME",
+      "layoutMode": "HORIZONTAL",
+      "itemSpacing": 32,
+      "counterAxisAlignItems": "CENTER",
+      "children": [
+        {
+          "id": "4:4",
+          "name": "Link 1",
+          "type": "TEXT",
+          "characters": "Features",
+          "fontSize": 14,
+          "fontName": { "family": "Inter", "style": "Medium" },
+          "fills": [{ "type": "SOLID", "color": { "r": 0.3, "g": 0.3, "b": 0.35 } }]
+        },
+        {
+          "id": "4:5",
+          "name": "Link 2",
+          "type": "TEXT",
+          "characters": "Pricing",
+          "fontSize": 14,
+          "fontName": { "family": "Inter", "style": "Medium" },
+          "fills": [{ "type": "SOLID", "color": { "r": 0.3, "g": 0.3, "b": 0.35 } }]
+        },
+        {
+          "id": "4:6",
+          "name": "Link 3",
+          "type": "TEXT",
+          "characters": "Docs",
+          "fontSize": 14,
+          "fontName": { "family": "Inter", "style": "Medium" },
+          "fills": [{ "type": "SOLID", "color": { "r": 0.3, "g": 0.3, "b": 0.35 } }]
+        }
+      ]
+    },
+    {
+      "id": "4:7",
+      "name": "Sign In Button",
+      "type": "FRAME",
+      "layoutMode": "HORIZONTAL",
+      "primaryAxisAlignItems": "CENTER",
+      "counterAxisAlignItems": "CENTER",
+      "paddingTop": 8,
+      "paddingRight": 20,
+      "paddingBottom": 8,
+      "paddingLeft": 20,
+      "cornerRadius": 6,
+      "fills": [{ "type": "SOLID", "color": { "r": 0.07, "g": 0.07, "b": 0.12 } }],
+      "children": [
+        {
+          "id": "4:8",
+          "name": "Button Label",
+          "type": "TEXT",
+          "characters": "Sign in",
+          "fontSize": 14,
+          "fontName": { "family": "Inter", "style": "Medium" },
+          "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 } }]
+        }
+      ]
+    }
+  ]
+}

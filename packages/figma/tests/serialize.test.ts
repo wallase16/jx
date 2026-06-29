@@ -81,4 +81,120 @@ describe("serializeNode", () => {
     expect(out.fills).toBeUndefined();
     expect(out.children).toBeUndefined();
   });
+
+  test("serializes Phase 1 fields: strokes, effects, sizing, constraints", () => {
+    const raw: RawFigmaNode = {
+      type: "FRAME",
+      layoutWrap: "WRAP",
+      counterAxisSpacing: 16,
+      layoutSizingHorizontal: "FILL",
+      layoutSizingVertical: "HUG",
+      minWidth: 200,
+      maxWidth: 800,
+      minHeight: 100,
+      maxHeight: 600,
+      rectangleCornerRadii: [8, 8, 0, 0],
+      strokes: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }],
+      strokeWeight: 2,
+      strokeAlign: "INSIDE",
+      dashPattern: [4, 4],
+      clipsContent: true,
+      x: 10,
+      y: 20,
+      rotation: 45,
+      effects: [{ type: "DROP_SHADOW", visible: true, radius: 4 }],
+    };
+    const out = serializeNode(raw);
+    expect(out.layoutWrap).toBe("WRAP");
+    expect(out.counterAxisSpacing).toBe(16);
+    expect(out.layoutSizingHorizontal).toBe("FILL");
+    expect(out.layoutSizingVertical).toBe("HUG");
+    expect(out.minWidth).toBe(200);
+    expect(out.maxWidth).toBe(800);
+    expect(out.minHeight).toBe(100);
+    expect(out.maxHeight).toBe(600);
+    expect(out.rectangleCornerRadii).toEqual([8, 8, 0, 0]);
+    expect(out.strokes).toHaveLength(1);
+    expect(out.strokeWeight).toBe(2);
+    expect(out.strokeAlign).toBe("INSIDE");
+    expect(out.dashPattern).toEqual([4, 4]);
+    expect(out.clipsContent).toBe(true);
+    expect(out.x).toBe(10);
+    expect(out.y).toBe(20);
+    expect(out.rotation).toBe(45);
+    expect(out.effects).toHaveLength(1);
+  });
+
+  test("serializes Phase 1 text fields: lineHeight, letterSpacing, textDecoration, textCase", () => {
+    const raw: RawFigmaNode = {
+      type: "TEXT",
+      characters: "Hello",
+      lineHeight: { value: 24, unit: "PIXELS" },
+      letterSpacing: { value: 5, unit: "PERCENT" },
+      textDecoration: "UNDERLINE",
+      textCase: "UPPER",
+      textAlignVertical: "CENTER",
+    };
+    const out = serializeNode(raw);
+    expect(out.lineHeight).toEqual({ value: 24, unit: "PIXELS" });
+    expect(out.letterSpacing).toEqual({ value: 5, unit: "PERCENT" });
+    expect(out.textDecoration).toBe("UNDERLINE");
+    expect(out.textCase).toBe("UPPER");
+    expect(out.textAlignVertical).toBe("CENTER");
+  });
+
+  test("drops symbol values for Phase 1 mixed fields", () => {
+    const mixed = Symbol("figma.mixed");
+    const raw: RawFigmaNode = {
+      type: "FRAME",
+      minWidth: mixed,
+      maxWidth: mixed,
+      rotation: mixed,
+      strokeWeight: mixed,
+      rectangleCornerRadii: mixed as unknown as [number, number, number, number] | symbol,
+    };
+    const out = serializeNode(raw);
+    expect(out.minWidth).toBeUndefined();
+    expect(out.maxWidth).toBeUndefined();
+    expect(out.rotation).toBeUndefined();
+    expect(out.strokeWeight).toBeUndefined();
+    expect(out.rectangleCornerRadii).toBeUndefined();
+  });
+
+  test("drops symbol values for text fields", () => {
+    const mixed = Symbol("figma.mixed");
+    const raw: RawFigmaNode = {
+      type: "TEXT",
+      lineHeight: mixed as unknown as { value?: number; unit?: string } | symbol,
+      letterSpacing: mixed as unknown as { value?: number; unit?: string } | symbol,
+      textDecoration: mixed,
+      textCase: mixed,
+    };
+    const out = serializeNode(raw);
+    expect(out.lineHeight).toBeUndefined();
+    expect(out.letterSpacing).toBeUndefined();
+    expect(out.textDecoration).toBeUndefined();
+    expect(out.textCase).toBeUndefined();
+  });
+
+  test("serializes boundVariables and resolvedVariables", () => {
+    const raw: RawFigmaNode = {
+      type: "FRAME",
+      boundVariables: { fills: { type: "VARIABLE_ALIAS", id: "var:1" } },
+      resolvedVariables: { fills: { id: "var:1", name: "brand/primary" } },
+    };
+    const out = serializeNode(raw);
+    expect(out.boundVariables?.fills).toEqual({ type: "VARIABLE_ALIAS", id: "var:1" });
+    expect(out.resolvedVariables?.fills).toEqual({ id: "var:1", name: "brand/primary" });
+  });
+
+  test("serializes constraints", () => {
+    const raw: RawFigmaNode = {
+      type: "FRAME",
+      constraints: { horizontal: { type: "STRETCH" }, vertical: { type: "MIN" } },
+    };
+    const out = serializeNode(raw);
+    expect(out.constraints?.horizontal?.type).toBe("STRETCH");
+    expect(out.constraints?.vertical?.type).toBe("MIN");
+  });
 });

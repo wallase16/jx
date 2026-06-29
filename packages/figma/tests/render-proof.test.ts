@@ -1,13 +1,8 @@
 /**
  * Render proof — the de-risk gate for the Figma plugin.
  *
- * The whole "it's alive inside Figma" hook rests on one assumption: a tree produced by figmaToJx
- * can be mounted by the real @jxsuite/runtime with no server, no build step, no DOM of its own
- * beyond a throwaway container — exactly the conditions inside the plugin's iframe.
- *
- * This test converts the fixture and drives it through the runtime's buildScope → renderNode
- * pipeline (the same path render-critic uses), then asserts real DOM came out with the expected
- * text and computed-ish styles. If this passes, the preview shell is just packaging.
+ * Converts fixtures and drives them through the runtime's buildScope → renderNode pipeline, then
+ * asserts real DOM came out with the expected text and styles.
  */
 
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
@@ -17,6 +12,8 @@ import { buildScope, renderNode, setSkipServerFunctions } from "@jxsuite/runtime
 import { figmaToJx } from "../src/convert/figma-to-jx.ts";
 import type { FigmaNode } from "../src/convert/figma-to-jx.ts";
 import pricingCard from "./fixtures/pricing-card.json" with { type: "json" };
+import heroSection from "./fixtures/hero-section.json" with { type: "json" };
+import navBar from "./fixtures/nav-bar.json" with { type: "json" };
 
 beforeAll(() => {
   try {
@@ -48,5 +45,47 @@ describe("render proof", () => {
     // Flexbox style made it onto the root element's inline style.
     expect(root.style.display).toBe("flex");
     expect(root.style.flexDirection).toBe("column");
+  });
+
+  test("gradient background lands on the hero section root", async () => {
+    setSkipServerFunctions(true);
+    const { document: doc } = figmaToJx(heroSection as FigmaNode);
+
+    const state = await buildScope(doc, {});
+    const container = document.createElement("div");
+    container.append(renderNode(doc, state));
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.background).toContain("linear-gradient(");
+    expect(root.style.overflow).toBe("hidden");
+  });
+
+  test("typography styles survive round-trip into DOM", async () => {
+    setSkipServerFunctions(true);
+    const { document: doc } = figmaToJx(heroSection as FigmaNode);
+
+    const state = await buildScope(doc, {});
+    const container = document.createElement("div");
+    container.append(renderNode(doc, state));
+
+    const h1 = container.querySelector("h1") as HTMLElement;
+    expect(h1).toBeTruthy();
+    expect(h1.textContent).toBe("Design to code in seconds");
+    expect(h1.style.lineHeight).toBe("64px");
+    expect(h1.style.fontSize).toBe("56px");
+  });
+
+  test("stroke border and backdrop-filter land on nav bar", async () => {
+    setSkipServerFunctions(true);
+    const { document: doc } = figmaToJx(navBar as FigmaNode);
+
+    const state = await buildScope(doc, {});
+    const container = document.createElement("div");
+    container.append(renderNode(doc, state));
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.display).toBe("flex");
+    expect(root.textContent).toContain("Features");
+    expect(root.textContent).toContain("Sign in");
   });
 });
