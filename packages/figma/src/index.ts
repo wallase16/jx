@@ -9,3 +9,6 @@ export type {
   ConvertResult,
   ConvertOptions,
 } from "./convert/figma-to-jx.ts";
+export { emitProject } from "./emit/emit.ts";
+export type { EmitOptions, FileMap } from "./emit/emit.ts";
+export { buildZip } from "./emit/zip.ts";

@@ -7,4 +7,9 @@ describe("public API surface", () => {
     expect(typeof api.figmaColorToCss).toBe("function");
     expect(api.figmaToJx({ type: "TEXT", characters: "hi" }).document.tagName).toBe("p");
   });
+
+  test("exports the emit and zip entry points", () => {
+    expect(typeof api.emitProject).toBe("function");
+    expect(typeof api.buildZip).toBe("function");
+  });
 });

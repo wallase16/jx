@@ -1,6 +1,6 @@
 # Plan: Figma → Jx Plugin
 
-**Status:** Phase 1 ✅ complete — next up **Phase 2 (Download / eject)**
+**Status:** Phase 2 ✅ complete — next up **Phase 3 (Components & reactivity)**
 **Date:** 2026-06-28
 **Owner:** Gideon
 **Branch:** `feat/figma-plugin` (off clean `main`)
@@ -14,6 +14,55 @@ game every other figma-to-code tool plays).
 
 **LOE estimate:** ~10–14 engineering-days remaining for a dev familiar with the codebase (Phase 0
 already delivered in <1 day). Phases are independently shippable.
+
+---
+
+## Agency GTM & positioning
+
+> The plugin's job is to **introduce** Jx; it is not, by itself, the **agency go-to-market**. Those
+> are different bars — keep them separate or the wow-moment gets mistaken for an adoption strategy.
+
+**Primary ICP:** digital / design / web agencies (the people who live in Figma and feel
+design→dev handoff pain on every project). Secondary: in-house product design teams.
+
+### Introduce vs. adopt (the funnel)
+
+| Stage         | Who                          | What moves them                                                                 | Owned by                       |
+| ------------- | ---------------------------- | ------------------------------------------------------------------------------- | ------------------------------ |
+| **Introduce** | A designer/dev in the agency | The live-preview "your design is alive" moment, inside Figma, zero commitment   | **The plugin**                 |
+| **Evaluate**  | Tech lead                    | Output is _maintainable & editable_ (round-trips through Studio, not dead code) | Phase 2–3 + Studio             |
+| **Adopt**     | Agency owner / principal     | Multi-project leverage, client handoff, longevity, support — margin & speed     | Case studies + design partners |
+
+A plugin install reaches the **Introduce** row only. Standardising an agency onto Jx is an
+**Adopt**-row decision (they're betting client deliverables on a runtime) — won by proof of
+delivery, not by a wow-moment. Plan the plugin to _earn the first conversation_, not to close.
+
+### What agencies actually buy (and what it means for this plan)
+
+Agencies pay for **leverage across many client projects** — margin and delivery speed. That has
+two consequences for phase priority:
+
+1. **The agency value prop lives in Phase 3, not Phase 1.** "Your Figma component library becomes a
+   reusable, reactive Jx component set you reskin across every client" is the killer story — not
+   pixel-perfect single-frame import. Treat Phase 3 (components / variants→state / design-system
+   reuse) as the agency headline.
+2. **Do not over-invest in Phase 1 fidelity to impress agencies.** Medium fidelity + a
+   maintainable, editable, reusable result beats pixel-perfect _dead_ output. Agencies forgive a
+   90% import; they will not forgive output they can't maintain. (This is the trust scar the
+   Anima/Locofy/Builder category left — Jx's differentiator is the editable JSON document, Studio,
+   and static compile — _not_ export fidelity. Position against the category, don't join it.)
+
+### Marketing motion (beyond the plugin listing)
+
+The plugin is awareness; the **conversion motion is proof of delivery**:
+
+- **Design-partner 2–3 agencies** — ship real client sites on Jx, in exchange for case studies.
+- **Lead with the reuse + handoff story**, not "Figma to code": build-once-reuse-everywhere
+  component libraries, maintainable round-trip editing, static deploy-anywhere client handoff.
+- **Case studies are the asset that gets Jx standardised**, not the plugin's store page.
+
+**One line:** plugin = the introduction; component-reuse + maintainable handoff + a couple of real
+agency case studies = the marketing. Use the first to earn the second.
 
 ---
 
@@ -57,9 +106,9 @@ The runtime applies scalar styles via `el.style[prop] = value` (`packages/runtim
       AI/import branches.
 - [x] No debris carried in: the `scratch-test-import.js`, `llm-test-1/`, and untracked
       `docs/site-cloning-guide.md` artifacts live only on the AI branch and are excluded here.
-- [ ] **Commit the Phase 0 spike** on `feat/figma-plugin` (`packages/figma/**` + this plan) so the
-      de-risk work is durable before fidelity work begins.
-- [ ] When Phase 2 copies emit code from `packages/import`, copy **only** the lean files — re-verify
+- [x] **Commit the Phase 0 spike** on `feat/figma-plugin` (`packages/figma/**` + this plan) —
+      done in `a1225fe`.
+- [x] When Phase 2 copies emit code from `packages/import`, copy **only** the lean files — re-verify
       nothing pulls `puppeteer-core`, `pixelmatch`, or `pngjs` into `packages/figma`.
 
 ---
@@ -188,7 +237,36 @@ _Goal: the funnel into the ecosystem — turn the live preview into a real proje
 
 Tests: emit-to-memory unit tests; a fixture → full project map → schema-validate every emitted doc.
 
-**Turnover (date): Phase 2 ✅ COMPLETE.** _(required)_
+**Turnover (2026-06-28): Phase 2 ✅ COMPLETE.**
+
+Built and verified end-to-end. All 5 plan items delivered.
+
+| File                  | Role                                                                                                                                                                                                                                                                                                                       |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/emit/emit.ts`    | In-memory project emission: takes `ConvertResult` → `FileMap` (Record of path→content). Produces `project.json` (with `$style` tokens when present), `pages/{name}.json`, and `public/images/` entries. Rewrites Phase 1's placeholder `images/{ref}.png` paths to `/images/{ref}.png` when real image bytes are provided. |
+| `src/emit/zip.ts`     | Zero-dependency store-only ZIP builder. Produces valid ZIP archives (local headers + central directory + EOCD) entirely in memory — no compression, no external libs. Includes a hand-rolled CRC-32 implementation.                                                                                                        |
+| `plugin/code.ts`      | Extended: collects `imageRefs` from `IMAGE` paint fills across the node tree and sends them alongside the serialized node. Handles `request-images` messages from the UI by fetching bytes via `figma.getImageByHash().getBytesAsync()` and posting them back.                                                             |
+| `plugin/ui.ts`        | Extended: stores the last `ConvertResult` and image refs. "Download .jx" button triggers project emission + zip build + browser download. When images exist, requests bytes from the sandbox first (deferred download pattern).                                                                                            |
+| `plugin/ui.html`      | Added toolbar with status + "Download .jx" button (Figma-blue, disabled until a frame is selected).                                                                                                                                                                                                                        |
+| `src/index.ts`        | Re-exports `emitProject`, `buildZip`, and their types (`EmitOptions`, `FileMap`).                                                                                                                                                                                                                                          |
+| `tests/emit.test.ts`  | 8 tests: project structure, custom names, token emission, image inclusion, path rewriting (img + background-image), placeholder preservation, no-token case.                                                                                                                                                               |
+| `tests/zip.test.ts`   | 5 tests: signature validation, multi-file, binary data round-trip, central directory offset, empty file map.                                                                                                                                                                                                               |
+| `tests/index.test.ts` | Extended: verifies `emitProject` and `buildZip` are exported.                                                                                                                                                                                                                                                              |
+
+Design decisions:
+
+- **In-memory file map, not a file-system write.** The Figma plugin iframe has no `node:fs` or `Bun.write` — all emission builds a `Record<string, string | Uint8Array>` which the zip builder consumes directly. This also makes the emit module unit-testable without mocking I/O.
+- **Store-only ZIP (no compression).** JSON documents compress well but adding deflate would mean either a dependency or ~300 more lines of bit-twiddling. Store-only keeps the zip builder at ~120 lines, zero deps, and the resulting zips are still small (typical project < 50 KB). Can add deflate later if file size becomes a concern.
+- **Deferred image download pattern.** The "Download .jx" button click first requests image bytes from the sandbox (which has `figma.getImageByHash()`), waits for the response, then builds the zip. This avoids fetching image bytes on every selection change (which would be slow for large designs).
+- **Image path rewriting uses JSON reviver.** `JSON.parse(JSON.stringify(doc), reviver)` walks every string value in the document and rewrites `images/{ref}.png` → `/images/{ref}.png` and `url(images/{ref}.png)` → `url(/images/{ref}.png)` when the ref exists in the provided image map. This handles both `<img>` src attributes and CSS `background-image` values without needing to walk the tree manually.
+- **Token values default to `inherit`.** Phase 1 collects token names but not their resolved values (Figma variables require `resolveVariable()` which needs async plugin API access). The emitted `project.json.$style` maps each `--token-name` to `"inherit"` as a placeholder — the user fills in actual values in Studio.
+
+Verification:
+
+- `bun test --isolate --coverage` in `packages/figma`: **88 tests pass, 100% functions / 99.33% lines**.
+- `scripts/check-coverage-manifest.ts packages/figma`: all source files covered.
+- `oxlint`: zero violations across `src/`, `tests/`, and `plugin/`.
+- Round-trip proof: emit test converts a pricing-card fixture → emits project → parses the emitted JSON → asserts structure matches expectations (valid `project.json` with name/defaults, valid page document with correct tagName).
 
 ---
 

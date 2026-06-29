@@ -31,7 +31,8 @@ await Bun.write(join(distDir, "code.js"), await code.outputs[0].text());
 const ui = await Bun.build({
   entrypoints: [join(here, "ui.ts")],
   target: "browser",
-  minify: true,
+  format: "iife",
+  minify: { whitespace: true, syntax: true, identifiers: false },
 });
 if (!ui.success) {
   console.error(ui.logs.join("\n"));

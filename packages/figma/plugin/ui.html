@@ -16,18 +16,43 @@
         border-bottom: 1px solid #e0e0e0;
         background: #fff;
       }
+      #toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 12px;
+        background: #fff;
+        border-bottom: 1px solid #e0e0e0;
+      }
+      #download-btn {
+        padding: 4px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #fff;
+        background: #18a0fb;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      #download-btn:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
       #preview {
         padding: 24px;
         display: flex;
         justify-content: center;
         align-items: flex-start;
-        min-height: calc(100vh - 34px);
+        min-height: calc(100vh - 68px);
         box-sizing: border-box;
       }
     </style>
   </head>
   <body>
-    <div id="status">Loading…</div>
+    <div id="toolbar">
+      <div id="status">Loading…</div>
+      <button id="download-btn" disabled>Download .jx</button>
+    </div>
     <div id="preview"></div>
     <!-- __JX_UI_BUNDLE__ -->
   </body>
