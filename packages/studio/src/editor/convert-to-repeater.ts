@@ -68,10 +68,9 @@ export async function convertToRepeater() {
       repeater.sort = config.sort;
     }
 
-    (parent.children as (string | JxMutableNode)[])[idx] = {
-      children: repeater as unknown as (string | JxMutableNode)[],
-      tagName: "div",
-    };
+    // Replace the selected element in place with the array pseudo-element — no wrapper div. The
+    // Repeated items render directly among the original parent's children.
+    (parent.children as (string | JxMutableNode)[])[idx] = repeater as unknown as JxMutableNode;
   });
 }
 
@@ -111,7 +110,7 @@ async function promptRepeaterConfig(defs: Record<string, unknown>) {
 
   const fnDefs = Object.entries(defs).filter(([, d]) => defCategory(d) === "function");
 
-  let source = arrayDefs.length > 0 ? arrayDefs[0][0] : "__new__";
+  let source = arrayDefs.length > 0 ? arrayDefs[0]![0] : "__new__";
   let newDefName = "";
   let filterDef = "";
   let sortDef = "";

@@ -2,9 +2,9 @@
  * Function-editor panel tests (E9). Monaco cannot load in happy-dom, so editor.api is mocked with a
  * minimal fake editor that mirrors the bits editors.ts relies on (create/get/setValue/dispose/
  * change events, setValue firing onDidChangeModelContent like real Monaco). The tests then drive
- * the real renderFunctionEditor/registerFunctionCompletions flows: canvas teardown, breadcrumb,
- * format/lint on open, target re-sync, debounced state sync for defs and events, and the state
- * completion provider.
+ * the real renderFunctionEditor/registerFunctionCompletions flows: canvas teardown, format/lint on
+ * open, target re-sync, debounced state sync for defs and events, and the state completion
+ * provider.
  */
 import { flush, installMockPlatform, resetWorkspaceWithTab } from "./harness";
 import { beforeEach, describe, expect, mock, test } from "bun:test";
@@ -60,7 +60,7 @@ const registerCompletionItemProvider = mock((_lang: string, _provider: unknown) 
   dispose: () => {},
 }));
 
-mock.module("monaco-editor/esm/vs/editor/editor.api.js", () => ({
+void mock.module("monaco-editor/esm/vs/editor/editor.api.js", () => ({
   MarkerSeverity: { Error: 8, Warning: 4 },
   Uri: { parse: (u: string) => ({ target: u, toString: () => u }) },
   editor: {
@@ -80,7 +80,7 @@ mock.module("monaco-editor/esm/vs/editor/editor.api.js", () => ({
 const { registerFunctionCompletions, renderFunctionEditor } = await import("../src/panels/editors");
 const { canvasPanels, initShellRefs, registerRenderer } = await import("../src/store");
 const { view } = await import("../src/view");
-const { activeTab, closeAllTabs, openTab } = await import("../src/workspace/workspace");
+const { activeTab, closeAllTabs } = await import("../src/workspace/workspace");
 
 document.body.innerHTML = `<div id="app"><div id="canvas-wrap"></div></div>`;
 initShellRefs();
@@ -153,7 +153,7 @@ beforeEach(() => {
 });
 
 describe("renderFunctionEditor — def target", () => {
-  test("tears down canvas state and renders the editor with breadcrumb", () => {
+  test("tears down canvas state and renders the editor", () => {
     const dndCleanup = mock(() => {});
     const eventCleanup = mock(() => {});
     view.canvasDndCleanups = [dndCleanup];
@@ -161,33 +161,26 @@ describe("renderFunctionEditor — def target", () => {
     canvasPanels.push({ id: "panel" } as never);
     setEditing({ defName: "greet", type: "def" });
 
-    const close = mock(() => {});
-    renderFunctionEditor(close);
+    renderFunctionEditor();
 
     expect(dndCleanup).toHaveBeenCalledTimes(1);
     expect(eventCleanup).toHaveBeenCalledTimes(1);
     expect(view.canvasDndCleanups).toHaveLength(0);
     expect(view.canvasEventCleanups).toHaveLength(0);
     expect(canvasPanels).toHaveLength(0);
-    expect(toolbarRender).toHaveBeenCalled();
 
-    const crumbs = [...canvasWrap.querySelectorAll(".breadcrumb-item")].map((el) => el.textContent);
-    expect(crumbs).toEqual(["index.json", "ƒ greet"]);
+    // The editor surface is rendered; the Back button + breadcrumb live in the tab bar now.
+    expect(canvasWrap.querySelector(".source-editor")).not.toBeNull();
+    expect(canvasWrap.querySelector(".breadcrumb-item")).toBeNull();
     expect(canvasWrap.style.padding).toBe("0px");
 
     expect(created).toHaveLength(1);
-    expect(created[0].options.language).toBe("javascript");
-    expect(created[0].value).toBe("return 1;");
+    expect(created[0]!.options.language).toBe("javascript");
+    expect(created[0]!.value).toBe("return 1;");
     expect(view.functionEditor).toBe(created[0] as never);
     expect(view.functionEditor!._editingTarget).toBe(
       JSON.stringify({ defName: "greet", type: "def" }),
     );
-
-    // Back button closes the editor
-    canvasWrap
-      .querySelector("sp-action-button")!
-      .dispatchEvent(new Event("click", { bubbles: true }));
-    expect(close).toHaveBeenCalledTimes(1);
   });
 
   test("formats on open and applies lint markers from diagnostics", async () => {
@@ -211,13 +204,13 @@ describe("renderFunctionEditor — def target", () => {
       ],
     };
     setEditing({ defName: "greet", type: "def" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     await flush();
 
     // Format request carries the def's parameter names; formatted code replaces the buffer
     const formatCall = codeServiceCalls.find(([action]) => action === "format")!;
     expect(formatCall[1]).toEqual({ args: ["state", "name"], code: "return 1;" });
-    expect(created[0].value).toBe("return 1;\n");
+    expect(created[0]!.value).toBe("return 1;\n");
 
     expect(setModelMarkers).toHaveBeenCalledTimes(1);
     const [model, owner, markers] = setModelMarkers.mock.calls[0] as any[];
@@ -239,29 +232,29 @@ describe("renderFunctionEditor — def target", () => {
 
   test("re-render with the same target re-syncs the buffer instead of recreating", () => {
     setEditing({ defName: "greet", type: "def" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     expect(created).toHaveLength(1);
     const [ed] = created;
 
     // Buffer drifted from the document → re-sync writes the body back with the ignore flag
-    ed.value = "drifted()";
-    renderFunctionEditor(() => {});
+    ed!.value = "drifted()";
+    renderFunctionEditor();
     expect(created).toHaveLength(1);
-    expect(ed.value).toBe("return 1;");
+    expect(ed!.value).toBe("return 1;");
 
     // Buffer already in sync → nothing happens
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     expect(created).toHaveLength(1);
-    expect(ed.value).toBe("return 1;");
-    expect(ed.disposed).toBe(false);
+    expect(ed!.value).toBe("return 1;");
+    expect(ed!.disposed).toBe(false);
   });
 
   test("debounced edits write the body back to the state def and lint the new code", async () => {
     setEditing({ defName: "greet", type: "def" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     const [ed] = created;
 
-    ed.type("return 42;");
+    ed!.type("return 42;");
     await sleep(600);
     const { greet } = activeTab.value!.doc.document.state as any;
     expect(greet.body).toBe("return 42;");
@@ -276,11 +269,11 @@ describe("renderFunctionEditor — def target", () => {
 
   test("renders an empty buffer for missing or non-function defs", () => {
     setEditing({ defName: "missing", type: "def" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     expect(created.at(-1)!.value).toBe("");
 
     setEditing({ defName: "plain", type: "def" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     expect(created.at(-1)!.value).toBe("");
     // Non-function defs fall back to the default arg names
     const formatCall = codeServiceCalls.findLast(([action]) => action === "format")!;
@@ -289,28 +282,26 @@ describe("renderFunctionEditor — def target", () => {
 });
 
 describe("renderFunctionEditor — event target", () => {
-  test("switching targets disposes previous editors and shows the event label", () => {
+  test("switching targets disposes previous editors and loads the event body", () => {
     setEditing({ defName: "greet", type: "def" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     const [first] = created;
     const strayMonaco = { dispose: mock(() => {}) };
     view.monacoEditor = strayMonaco as never;
 
     setEditing({ eventKey: "onclick", path: ["children", 0], type: "event" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
 
-    expect(first.disposed).toBe(true);
+    expect(first!.disposed).toBe(true);
     expect(strayMonaco.dispose).toHaveBeenCalledTimes(1);
     expect(view.monacoEditor).toBeNull();
     expect(created).toHaveLength(2);
-    expect(created[1].value).toBe("go()");
-    const current = canvasWrap.querySelector(".breadcrumb-item.current");
-    expect(current?.textContent).toBe("ƒ onclick");
+    expect(created[1]!.value).toBe("go()");
   });
 
   test("debounced edits update the event handler property preserving its shape", async () => {
     setEditing({ eventKey: "onclick", path: ["children", 0], type: "event" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     const ed = created.at(-1)!;
 
     ed.type("doIt(state)");
@@ -324,7 +315,7 @@ describe("renderFunctionEditor — event target", () => {
 
   test("renders an empty buffer for an unrecognized editing type", () => {
     setEditing({ type: "mystery" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     expect(created.at(-1)!.value).toBe("");
   });
 
@@ -339,7 +330,7 @@ describe("renderFunctionEditor — event target", () => {
           : Promise.resolve(null)) as never,
     });
     setEditing({ defName: "greet", type: "def" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     const ed = created.at(-1)!;
     setModelMarkers.mockClear();
 
@@ -372,17 +363,8 @@ describe("renderFunctionEditor — event target", () => {
 
   test("renders an empty buffer when the event path resolves to nothing", () => {
     setEditing({ eventKey: "onclick", path: ["children", 99], type: "event" });
-    renderFunctionEditor(() => {});
+    renderFunctionEditor();
     expect(created.at(-1)!.value).toBe("");
-  });
-
-  test("falls back to the document tagName when the tab has no path", () => {
-    closeAllTabs();
-    openTab({ document: docFixture(), documentPath: "", id: "no-path" });
-    setEditing({ defName: "greet", type: "def" });
-    renderFunctionEditor(() => {});
-    const crumbs = [...canvasWrap.querySelectorAll(".breadcrumb-item")].map((el) => el.textContent);
-    expect(crumbs[0]).toBe("div");
   });
 });
 
@@ -415,7 +397,7 @@ describe("registerFunctionCompletions", () => {
 
   test("returns no suggestions without an active tab", () => {
     closeAllTabs();
-    const [[, provider]] = registerCompletionItemProvider.mock.calls as any[][];
+    const [, provider] = registerCompletionItemProvider.mock.calls[0]! as any[];
     const model = { getWordUntilPosition: () => ({ endColumn: 1, startColumn: 1 }) };
     expect(provider.provideCompletionItems(model, { lineNumber: 1 }).suggestions).toEqual([]);
   });

@@ -7,7 +7,7 @@ import { activeTab } from "../workspace/workspace";
 import { mutateInsertNode, transactDoc } from "../tabs/transact";
 import { view } from "../view";
 import { getEffectiveElements } from "../site-context";
-import { componentRegistry } from "../files/components";
+import { buildComponentInstance, componentRegistry } from "../files/components";
 
 import type { ComponentEntry } from "../files/components";
 import type { JxElement, JxMutableNode } from "@jxsuite/schema/types";
@@ -134,24 +134,15 @@ export function renderElementsTemplate(ctx: {
                       const parentPath = t?.session.selection || [];
                       const parent = getNodeAtPath(t!.doc.document, parentPath);
                       const idx = childList(parent).length;
-                      const instanceDef = {
-                        $props: Object.fromEntries(
-                          (comp.props || []).map(
-                            (/** @type {{ name: string; default?: unknown }} */ p) => [
-                              p.name,
-                              p.default !== undefined ? p.default : "",
-                            ],
-                          ),
-                        ),
-                        tagName: comp.tagName,
-                      };
+                      const instanceDef = buildComponentInstance(comp);
                       transactDoc(t!, (tr) =>
                         mutateInsertNode(tr, parentPath, idx, structuredClone(instanceDef)),
                       );
                     }}
                   >
                     <div class="element-card-preview">
-                      <span style="color:var(--fg-dim);font-size:11px;font-style:italic"
+                      <span
+                        style="color:var(--fg-dim);font-size:var(--spectrum-font-size-50, 11px);font-style:italic"
                         >&lt;${comp.tagName}&gt;</span
                       >
                     </div>

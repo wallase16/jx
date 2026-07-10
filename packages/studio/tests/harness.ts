@@ -17,7 +17,7 @@ import { registerPlatform } from "../src/platform";
 import { setProjectState } from "../src/store";
 import { closeAllTabs, openTab } from "../src/workspace/workspace";
 import type { JxMutableNode } from "@jxsuite/schema/types";
-import type { DirEntry, ProjectState, StudioPlatform } from "../src/types";
+import type { DirEntry, ProjectState, RenameResult, StudioPlatform } from "../src/types";
 
 // ─── Lit rendering ────────────────────────────────────────────────────────────
 
@@ -124,12 +124,7 @@ export function installMockPlatform(
   const platform: StudioPlatform = {
     activate: log("activate", async () => {}),
     addPackage: log("addPackage", async () => ({})),
-    aiAuthStatus: log("aiAuthStatus", async () => ({ authenticated: false })),
-    aiCreateSession: log("aiCreateSession", async () => ({ id: "mock-session" })),
-    aiDeleteSession: log("aiDeleteSession", async () => {}),
-    aiSendMessage: log("aiSendMessage", async () => {}),
-    aiStopSession: log("aiStopSession", async () => {}),
-    aiStreamUrl: log("aiStreamUrl", () => "/__mock/ai/stream"),
+    aiChatUrl: log("aiChatUrl", () => "/__mock/ai/chat"),
     codeService: log("codeService", async () => null),
     createDirectory: log("createDirectory", async () => {}),
     createProject: log("createProject", async (opts) => ({
@@ -179,12 +174,13 @@ export function installMockPlatform(
       return content;
     }),
     removePackage: log("removePackage", async () => ({})),
-    renameFile: log("renameFile", async (from, to) => {
+    renameFile: log("renameFile", async (from, to): Promise<RenameResult> => {
       const content = state.files.get(from);
       if (content !== undefined) {
         state.files.delete(from);
         state.files.set(to, content);
       }
+      return { from, ok: true, to };
     }),
     resolveSiteContext: log("resolveSiteContext", async () => ({ sitePath: null })),
     searchFiles: log("searchFiles", async (query) =>

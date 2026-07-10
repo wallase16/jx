@@ -1,10 +1,16 @@
+# Bun's default "isolated" linker (1.3+) mis-resolves package `exports` in this
+# workspace — e.g. @vue/reactivity resolves to its CJS `index.js` (whose exports
+# bun can't statically analyze) during the `--target=node` prepare builds, so
+# `bun install` fails running workspace prepare scripts. The classic hoisted
+# layout resolves correctly (and matches the Nix build). See oven-sh/bun#23615.
+[install]
+linker = "hoisted"
+
 [test]
+# `result` is the Nix build output symlink (-> /nix/store/...jx-studio). Without this, a root-level
+# `bun test` follows it and runs the stale built copy's ~680 test files. CI runs tests per-package
+# (cwd inside each package), so this only affects root-level runs.
+pathIgnorePatterns = ["**/result/**"]
 coverageReporter = ["text"]
 coverageSkipTestFiles = true
-coveragePathIgnorePatterns = [
-  "**/_fixtures_handlers/**",
-  "**/_fixtures_proto/**",
-  "**/tests/_studio_fixtures/**",
-  "**/tests/fixtures/**",
-  "./result/**",
-]
+coveragePathIgnorePatterns = ["**/dist/**", "**/tests/**", "./result/**"]

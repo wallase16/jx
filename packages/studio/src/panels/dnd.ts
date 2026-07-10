@@ -10,6 +10,7 @@ import {
   monitorForElements,
 } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
+import { disableNativeDragPreview } from "@atlaskit/pragmatic-drag-and-drop/element/disable-native-drag-preview";
 import {
   attachInstruction,
   extractInstruction,
@@ -27,16 +28,27 @@ import {
 import { mutateInsertNode, mutateMoveNode, transact, transactDoc } from "../tabs/transact";
 import { activeTab } from "../workspace/workspace";
 import { view } from "../view";
-import { componentRegistry, computeRelativePath } from "../files/components";
-import { renderComponentPreview } from "./stylebook-panel";
+import {
+  buildComponentInstance,
+  componentRegistry,
+  computeRelativePath,
+} from "../files/components";
+import { renderComponentPreview } from "./component-preview";
 import { defaultDef, unsafeTags } from "./shared";
+import { elementAtPoint } from "../utils/geometry";
 import type { JxPath } from "../state";
+import type { Tab } from "../tabs/tab";
 import type { JxMutableNode } from "@jxsuite/schema/types";
 import type { ComponentEntry } from "../files/components.js";
 
 interface DragCanDragArgs {
   element: HTMLElement;
   input: { clientX: number; clientY: number };
+}
+
+/** The `onGenerateDragPreview` argument subset we forward to {@link disableNativeDragPreview}. */
+interface DragPreviewArgs {
+  nativeSetDragImage: ((image: Element, x: number, y: number) => void) | null;
 }
 
 interface DragDropSourceArgs {
@@ -63,15 +75,15 @@ export function registerLayersDnD() {
     for (const row of container.querySelectorAll("[data-dnd-row]") as NodeListOf<HTMLElement>) {
       const rowPath = (row.dataset.path as string)
         .split("/")
-        .map((s: string) => (/^\d+$/.test(s) ? Number.parseInt(s, 10) : s)) as JxPath;
-      const rowDepth = Number.parseInt(row.dataset.dndDepth as string, 10) || 0;
+        .map((s: string) => (/^\d+$/.test(s) ? Math.trunc(Number(s)) : s)) as JxPath;
+      const rowDepth = Math.trunc(Number(row.dataset.dndDepth as string)) || 0;
       const isVoid = Object.hasOwn(row.dataset, "dndVoid");
       const isExpanded = Object.hasOwn(row.dataset, "dndExpanded");
 
       const cleanup = combine(
         draggable({
           canDrag({ element: _el, input }: DragCanDragArgs) {
-            const target = document.elementFromPoint(input.clientX, input.clientY) as HTMLElement;
+            const target = elementAtPoint(input.clientX, input.clientY) as HTMLElement;
             if (target?.closest(".layer-actions")) {
               return false;
             }
@@ -80,6 +92,11 @@ export function registerLayersDnD() {
           element: row,
           getInitialData() {
             return { path: rowPath, type: "tree-node" };
+          },
+          onGenerateDragPreview({ nativeSetDragImage }: DragPreviewArgs) {
+            // Suppress the browser's native drag image — the cross-frame ghost (Phase 4c) is the
+            // Only drag affordance, so a duplicate native preview would double up.
+            disableNativeDragPreview({ nativeSetDragImage });
           },
           onDragStart() {
             row.classList.add("dragging");
@@ -158,7 +175,8 @@ export function registerLayersDnD() {
         const srcRow = srcData.type === "tree-node" && source.element;
         const wasExpanded = srcRow && Object.hasOwn(srcRow.dataset, "dndExpanded");
 
-        applyDropInstruction(instruction, srcData, targetPath);
+        // Parent-originated layer drops legitimately target the active tab.
+        applyDropInstruction(activeTab.value, instruction, srcData, targetPath);
 
         if (wasExpanded) {
           const tab = activeTab.value;
@@ -205,29 +223,20 @@ export function registerComponentsDnD() {
       // Fill preview with live rendered component
       const preview = row.querySelector(".element-card-preview");
       if (preview && !preview.querySelector(tagName)) {
-        renderComponentPreview(comp).then((el: HTMLElement) => {
+        void renderComponentPreview(comp).then((el: HTMLElement) => {
           preview.textContent = "";
           preview.append(el);
         });
       }
 
-      const instanceDef = {
-        $props: comp.props
-          ? Object.fromEntries(
-              comp.props.map(
-                (/** @type {{ name: string; default?: unknown; [k: string]: unknown }} */ p) => [
-                  p.name,
-                  p.default !== undefined ? p.default : "",
-                ],
-              ),
-            )
-          : {},
-        tagName: comp.tagName,
-      };
+      const instanceDef = buildComponentInstance(comp);
       const cleanup = draggable({
         element: row,
         getInitialData() {
           return { fragment: structuredClone(instanceDef), type: "block" };
+        },
+        onGenerateDragPreview({ nativeSetDragImage }: DragPreviewArgs) {
+          disableNativeDragPreview({ nativeSetDragImage });
         },
       });
       view.dndCleanups.push(cleanup);
@@ -255,6 +264,9 @@ export function registerElementsDnD() {
         element: row,
         getInitialData() {
           return { fragment: structuredClone(def), type: "block" };
+        },
+        onGenerateDragPreview({ nativeSetDragImage }: DragPreviewArgs) {
+          disableNativeDragPreview({ nativeSetDragImage });
         },
       });
       view.dndCleanups.push(cleanup);
@@ -336,22 +348,34 @@ export function clearLayerDropGap(container: HTMLElement) {
   const rows = container.querySelectorAll(".layers-tree .layer-row");
   for (const r of rows) {
     (r as HTMLElement).style.transform = "";
+    // Also clear `display:none` left by hideDescendantRows. The `.layer-row` div has no `style`
+    // Lit binding and rows aren't keyed, so lit reuses these DOM nodes positionally on the
+    // Post-drop re-render — a stale `display:none` would otherwise hide whichever row lands on the
+    // Reused node (e.g. a sibling of the moved subtree).
+    (r as HTMLElement).style.display = "";
   }
 }
 
 /**
- * Apply a DnD instruction to the state
+ * Apply a DnD instruction to `tab`'s document. `tab` is the tab whose canvas the drop resolved in
+ * (host-routed for iframe drops — never the active tab at message time, which may have changed
+ * while the dropResult was in flight); a null tab is a no-op.
  *
+ * @param {Tab | null} tab
  * @param {{ type: string }} instruction
  * @param {Record<string, unknown>} srcData
  * @param {JxPath} targetPath
  */
 export function applyDropInstruction(
+  tab: Tab | null,
   instruction: { type: string },
   srcData: Record<string, unknown>,
   targetPath: JxPath,
 ) {
-  const doc = activeTab.value?.doc.document as JxMutableNode;
+  if (!tab) {
+    return;
+  }
+  const doc = tab.doc.document as JxMutableNode;
   if (srcData.type === "tree-node") {
     const fromPath = srcData.path as JxPath;
     const targetParent = parentElementPath(targetPath) as JxPath;
@@ -364,19 +388,17 @@ export function applyDropInstruction(
 
     switch (instruction.type) {
       case "reorder-above": {
-        transactDoc(activeTab.value, (t) => mutateMoveNode(t, fromPath, targetParent, targetIdx));
+        transactDoc(tab, (t) => mutateMoveNode(t, fromPath, targetParent, targetIdx));
         break;
       }
       case "reorder-below": {
-        transactDoc(activeTab.value, (t) =>
-          mutateMoveNode(t, fromPath, targetParent, targetIdx + 1),
-        );
+        transactDoc(tab, (t) => mutateMoveNode(t, fromPath, targetParent, targetIdx + 1));
         break;
       }
       case "make-child": {
         const target = getNodeAtPath(doc, targetPath);
         const len = childList(target).length;
-        transactDoc(activeTab.value, (t) => mutateMoveNode(t, fromPath, targetPath, len));
+        transactDoc(tab, (t) => mutateMoveNode(t, fromPath, targetPath, len));
         break;
       }
       default: {
@@ -392,7 +414,7 @@ export function applyDropInstruction(
 
     switch (instruction.type) {
       case "reorder-above": {
-        transactDoc(activeTab.value, (t) =>
+        transactDoc(tab, (t) =>
           mutateInsertNode(
             t,
             targetParent,
@@ -403,7 +425,7 @@ export function applyDropInstruction(
         break;
       }
       case "reorder-below": {
-        transactDoc(activeTab.value, (t) =>
+        transactDoc(tab, (t) =>
           mutateInsertNode(
             t,
             targetParent,
@@ -416,7 +438,7 @@ export function applyDropInstruction(
       case "make-child": {
         const target = getNodeAtPath(doc, targetPath);
         const len = childList(target).length;
-        transactDoc(activeTab.value, (t) =>
+        transactDoc(tab, (t) =>
           mutateInsertNode(t, targetPath, len, structuredClone(srcData.fragment as JxMutableNode)),
         );
         break;
@@ -432,8 +454,7 @@ export function applyDropInstruction(
     if (tag && tag.includes("-")) {
       const comp = componentRegistry.find((c: ComponentEntry) => c.tagName === tag);
       if (comp) {
-        const tab = activeTab.value;
-        const elements = tab?.doc.document?.$elements || [];
+        const elements = tab.doc.document?.$elements || [];
         if (comp.source === "npm") {
           const specifier = comp.modulePath ? `${comp.package}/${comp.modulePath}` : comp.package;
           if (!specifier) {
@@ -443,7 +464,7 @@ export function applyDropInstruction(
             (e: JxMutableNode | string | { $ref: string }) => e === specifier || e === comp.package,
           );
           if (!alreadyImported) {
-            transact(activeTab.value, (d: JxMutableNode) => {
+            transact(tab, (d: JxMutableNode) => {
               if (!d.$elements) {
                 d.$elements = [];
               }
@@ -462,7 +483,7 @@ export function applyDropInstruction(
           });
           if (!alreadyImported && comp.path) {
             const relPath = computeRelativePath(tab?.documentPath ?? null, comp.path);
-            transact(activeTab.value, (d: JxMutableNode) => {
+            transact(tab, (d: JxMutableNode) => {
               if (!d.$elements) {
                 d.$elements = [];
               }

@@ -17,6 +17,8 @@ const ALLOWLIST = new Set([
   "src/chromium/init.ts",
   // Desktop RPC schema: interfaces/type aliases only, no runtime exports.
   "src/rpc-schema.ts",
+  // Collab provider contract: interfaces/type aliases only, no runtime exports.
+  "src/provider.ts",
 ]);
 
 const pkgArg = process.argv.at(2);
@@ -49,7 +51,10 @@ for (const line of lcov.split("\n")) {
   if (rel.startsWith("..")) {
     continue;
   }
-  covered.add(rel);
+  // Normalize to forward slashes so comparisons hold on Windows, where both
+  // `relative()` and Bun.Glob yield backslash-separated paths but the ALLOWLIST
+  // (and SF: entries from a POSIX-built lcov) use forward slashes.
+  covered.add(rel.replaceAll("\\", "/"));
 }
 
 // Source layout: packages use src/**; @jxsuite/create keeps its sources at the
@@ -57,7 +62,8 @@ for (const line of lcov.split("\n")) {
 const hasSrc = existsSync(join(pkgDir, "src"));
 const glob = new Bun.Glob(hasSrc ? "src/**/*.ts" : "*.ts");
 const missing: string[] = [];
-for (const file of glob.scanSync({ cwd: pkgDir })) {
+for (const rawFile of glob.scanSync({ cwd: pkgDir })) {
+  const file = rawFile.replaceAll("\\", "/");
   if (file.endsWith(".d.ts")) {
     continue;
   }

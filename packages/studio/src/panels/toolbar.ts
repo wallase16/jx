@@ -5,15 +5,20 @@
  */
 
 import { html, render as litRender, nothing } from "lit-html";
-import { updateSession, updateUi } from "../store";
-import { redo as tabRedo, undo as tabUndo } from "../tabs/transact";
+import { openPublishPanel } from "../publish/publish-panel";
+import { updateSession } from "../store";
+import {
+  canRedo as tabCanRedo,
+  canUndo as tabCanUndo,
+  redo as tabRedo,
+  undo as tabUndo,
+} from "../tabs/transact";
+import { collabState } from "../collab/collab-state";
+import { presenceChipsTemplate } from "../collab/presence-chips";
 import { effect, effectScope } from "../reactivity";
 import { activeTab } from "../workspace/workspace";
-import type { DocumentStackEntry } from "../types";
-import { getEffectiveMedia } from "../site-context";
-import { mediaDisplayName } from "./shared";
 import { applyPanelCollapse, view } from "../view";
-import { getRecentProjects } from "../recent-projects";
+import { clearRecentProjects, getRecentProjects, removeRecentProject } from "../recent-projects";
 import { openQuickSearch } from "./quick-search";
 import { getPlatform } from "../platform";
 import { refreshGitStatus } from "./git-panel";
@@ -23,21 +28,9 @@ import type { EffectScope } from "@vue/reactivity";
 import type { TemplateResult } from "lit-html";
 
 interface ToolbarCtx {
-  navigateBack: () => void;
-  navigateToLevel: (level: number) => void;
   openProject: () => void;
   openFile?: (path: string) => void;
   saveFile: () => void;
-  parseMediaEntries: (media: Record<string, string> | null | undefined) => {
-    sizeBreakpoints: {
-      name: string;
-      query: string;
-      width: number;
-      type: string;
-    }[];
-    featureQueries: { name: string; query: string }[];
-    baseWidth: number;
-  };
   getCanvasMode: () => string;
   setCanvasMode: (mode: string) => void;
   renderCanvas: () => void;
@@ -54,7 +47,6 @@ let _scope: EffectScope | null = null;
 
 const toolbarIconMap = {
   "sp-icon-artboard": html`<sp-icon-artboard slot="icon"></sp-icon-artboard>`,
-  "sp-icon-back": html`<sp-icon-back slot="icon"></sp-icon-back>`,
   "sp-icon-brush": html`<sp-icon-brush slot="icon"></sp-icon-brush>`,
   "sp-icon-code": html`<sp-icon-code slot="icon"></sp-icon-code>`,
   "sp-icon-delete": html`<sp-icon-delete slot="icon"></sp-icon-delete>`,
@@ -77,8 +69,8 @@ const toolbarIconMap = {
  */
 function tbBtnTpl(label: string, onClick: () => void, iconTag?: string) {
   return html`
-    <sp-action-button size="s" @click=${onClick}>
-      ${iconTag ? toolbarIconMap[iconTag] : nothing} ${label}
+    <sp-action-button size="s" title=${label} @click=${onClick}>
+      ${iconTag ? toolbarIconMap[iconTag] : nothing}<span class="tb-label">${label}</span>
     </sp-action-button>
   `;
 }
@@ -116,6 +108,8 @@ export function mount(rootEl: HTMLElement, ctx: ToolbarCtx) {
         void tab.session.ui.gitStatus;
         void tab.history.index;
         void tab.history.snapshots.length;
+        void collabState(tab).status;
+        void collabState(tab).peers.length;
       }
       render();
     });
@@ -147,10 +141,15 @@ async function handleNewProject() {
   }
 }
 
-/** @param {ToolbarCtx} ctx */
-function minimalToolbarTemplate(ctx: ToolbarCtx) {
+/**
+ * The chevron dropdown beside "Open Project": New Project, the recent-projects list (each with a
+ * remove affordance), and a clear-all action. Shared by both the minimal and full toolbars.
+ *
+ * @param {ToolbarCtx} ctx
+ */
+function recentMenuTpl(ctx: ToolbarCtx) {
   const recentProjects = getRecentProjects();
-  const recentProjectsTpl = html`
+  return html`
     <overlay-trigger placement="bottom-start" triggered-by="click">
       <sp-action-button size="s" slot="trigger" title="Recent projects" class="tb-split-trigger">
         <sp-icon-chevron-down slot="icon"></sp-icon-chevron-down>
@@ -160,22 +159,52 @@ function minimalToolbarTemplate(ctx: ToolbarCtx) {
           @change=${(e: Event) => {
             const val = (e.target as unknown as HTMLInputElement).value;
             if (val === "__new__") {
-              handleNewProject();
+              void handleNewProject();
+            } else if (val === "__clear__") {
+              clearRecentProjects();
+              render();
             } else {
-              ctx.openRecentProject(val);
+              void ctx.openRecentProject(val);
             }
           }}
         >
           <sp-menu-item value="__new__">New Project…</sp-menu-item>
           ${recentProjects.length > 0
-            ? html`<sp-menu-divider></sp-menu-divider> ${recentProjects.map(
-                  (p) => html`<sp-menu-item value=${p.root}>${p.name}</sp-menu-item>`,
-                )}`
+            ? html`
+                <sp-menu-divider></sp-menu-divider>
+                ${recentProjects.map(
+                  (p) => html`
+                    <sp-menu-item value=${p.root} title=${p.root}>
+                      ${p.name}
+                      <sp-action-button
+                        slot="end"
+                        quiet
+                        size="s"
+                        title="Remove from recent"
+                        @click=${(e: Event) => {
+                          e.stopPropagation();
+                          removeRecentProject(p.root);
+                          render();
+                        }}
+                      >
+                        <sp-icon-close slot="icon"></sp-icon-close>
+                      </sp-action-button>
+                    </sp-menu-item>
+                  `,
+                )}
+                <sp-menu-divider></sp-menu-divider>
+                <sp-menu-item value="__clear__">Clear recent projects</sp-menu-item>
+              `
             : nothing}
         </sp-menu>
       </sp-popover>
     </overlay-trigger>
   `;
+}
+
+/** @param {ToolbarCtx} ctx */
+function minimalToolbarTemplate(ctx: ToolbarCtx) {
+  const recentProjectsTpl = recentMenuTpl(ctx);
 
   const windowControls = (
     globalThis as unknown as {
@@ -222,25 +251,36 @@ function minimalToolbarTemplate(ctx: ToolbarCtx) {
 
   return html`
     <div class="tb-split-btn">
-      <sp-action-button size="s" class="tb-split-main" @click=${ctx.openProject}>
-        ${toolbarIconMap["sp-icon-folder-open"]} Open Project
+      <sp-action-button
+        size="s"
+        class="tb-split-main"
+        title="Open Project"
+        @click=${ctx.openProject}
+      >
+        ${toolbarIconMap["sp-icon-folder-open"]}<span class="tb-label">Open Project</span>
       </sp-action-button>
       ${recentProjectsTpl}
     </div>
     ${tbBtnTpl("Manage", openBrowseModal, "sp-icon-view-list")}
-    <sp-action-button size="s" disabled>
-      ${toolbarIconMap["sp-icon-save-floppy"]} Save
+    <sp-action-button size="s" title="Save" disabled>
+      ${toolbarIconMap["sp-icon-save-floppy"]}<span class="tb-label">Save</span>
     </sp-action-button>
     <sp-action-group compact size="s">
-      <sp-action-button size="s" disabled>
-        ${toolbarIconMap["sp-icon-undo"]} Undo
+      <sp-action-button size="s" title="Undo" disabled>
+        ${toolbarIconMap["sp-icon-undo"]}<span class="tb-label">Undo</span>
       </sp-action-button>
-      <sp-action-button size="s" disabled>
-        ${toolbarIconMap["sp-icon-redo"]} Redo
+      <sp-action-button size="s" title="Redo" disabled>
+        ${toolbarIconMap["sp-icon-redo"]}<span class="tb-label">Redo</span>
       </sp-action-button>
     </sp-action-group>
     <div class="tb-spacer"></div>
-    <sp-action-button class="tb-search-trigger" size="s" quiet @click=${openQuickSearch}>
+    <sp-action-button
+      class="tb-search-trigger"
+      size="s"
+      quiet
+      title="Search files (⌘P)"
+      @click=${openQuickSearch}
+    >
       <sp-icon-search slot="icon"></sp-icon-search>
       <span class="tb-search-label">Search files… <kbd>⌘P</kbd></span>
     </sp-action-button>
@@ -248,8 +288,8 @@ function minimalToolbarTemplate(ctx: ToolbarCtx) {
     <sp-action-group selects="single" size="s" compact>
       ${modes.map(
         (m) => html`
-          <sp-action-button size="s" disabled ?selected=${m.key === "design"}>
-            ${toolbarIconMap[m.iconTag]}${m.label}
+          <sp-action-button size="s" title=${m.label} disabled ?selected=${m.key === "design"}>
+            ${toolbarIconMap[m.iconTag]}<span class="tb-label">${m.label}</span>
           </sp-action-button>
         `,
       )}
@@ -275,7 +315,6 @@ function minimalToolbarTemplate(ctx: ToolbarCtx) {
 const modes = [
   { iconTag: "sp-icon-edit", key: "edit", label: "Edit" },
   { iconTag: "sp-icon-artboard", key: "design", label: "Design" },
-  { iconTag: "sp-icon-preview", key: "preview", label: "Preview" },
   { iconTag: "sp-icon-code", key: "source", label: "Code" },
   { iconTag: "sp-icon-brush", key: "stylebook", label: "Stylebook" },
 ];
@@ -292,71 +331,20 @@ function toolbarTemplate() {
   }
 
   const allowedModes = new Set(tab.capabilities.modes);
-  const canUndo = tab.history.index > 0;
-  const canRedo = tab.history.index < tab.history.snapshots.length - 1;
+  const canUndo = tabCanUndo(tab);
+  const canRedo = tabCanRedo(tab);
   const canSave = tab.doc.dirty;
 
   const S = {
     dirty: tab.doc.dirty,
-    document: tab.doc.document,
-    documentPath: tab.documentPath,
-    documentStack: tab.session.documentStack,
     fileHandle: tab.fileHandle,
     mode: tab.doc.mode,
     selection: tab.session.selection,
     ui: tab.session.ui,
   };
-  const canvasMode = ctx.getCanvasMode();
-  const hasStack = S.documentStack && S.documentStack.length > 0;
-
-  const breadcrumbTpl = hasStack
-    ? html`
-        <div class="breadcrumb">
-          <sp-action-button size="s" title="Return to parent document" @click=${ctx.navigateBack}>
-            ${toolbarIconMap["sp-icon-back"]}Back
-          </sp-action-button>
-          ${S.documentStack.map(
-            (frame: DocumentStackEntry, i: number) => html`
-              <span class="breadcrumb-item clickable" @click=${() => ctx.navigateToLevel(i)}
-                >${frame.documentPath?.split("/").pop() || "untitled"}</span
-              >
-              <span class="breadcrumb-sep"> › </span>
-            `,
-          )}
-          <span class="breadcrumb-item current">
-            ${S.documentPath?.split("/").pop() || S.document.tagName || "document"}
-          </span>
-        </div>
-      `
-    : nothing;
-
-  const { featureQueries } = ctx.parseMediaEntries(getEffectiveMedia(S.document.$media));
-  const togglesTpl =
-    featureQueries.length > 0
-      ? html`
-          <sp-action-group compact size="s">
-            ${featureQueries.map(
-              (/** @type {{ name: string; query: string }} */ { name, query }) => html`
-                <sp-action-button
-                  toggles
-                  size="s"
-                  title=${query}
-                  ?selected=${Boolean(S.ui.featureToggles[name])}
-                  @click=${() => {
-                    const newToggles = {
-                      ...S.ui.featureToggles,
-                      [name]: !S.ui.featureToggles[name],
-                    };
-                    updateUi("featureToggles", newToggles);
-                  }}
-                >
-                  ${mediaDisplayName(name)}
-                </sp-action-button>
-              `,
-            )}
-          </sp-action-group>
-        `
-      : nothing;
+  // Base mode, not the effective mode: the switcher keeps Edit/Design highlighted while the
+  // Tab-bar preview toggle is on (preview is no longer a switchable mode).
+  const { canvasMode } = tab.session.ui;
 
   const modeSwitcherTpl = html`
     <sp-action-group selects="single" size="s" compact>
@@ -364,6 +352,7 @@ function toolbarTemplate() {
         (m) => html`
           <sp-action-button
             size="s"
+            title=${m.label}
             ?selected=${canvasMode === m.key}
             ?disabled=${!allowedModes.has(m.key)}
             @click=${() => {
@@ -392,7 +381,7 @@ function toolbarTemplate() {
               ctx.safeRenderRightPanel();
             }}
           >
-            ${toolbarIconMap[m.iconTag]}${m.label}
+            ${toolbarIconMap[m.iconTag]}<span class="tb-label">${m.label}</span>
           </sp-action-button>
         `,
       )}
@@ -477,73 +466,71 @@ function toolbarTemplate() {
         `
     : nothing;
 
-  const recentProjects = getRecentProjects();
-  const recentProjectsTpl = html`
-    <overlay-trigger placement="bottom-start" triggered-by="click">
-      <sp-action-button size="s" slot="trigger" title="Recent projects" class="tb-split-trigger">
-        <sp-icon-chevron-down slot="icon"></sp-icon-chevron-down>
-      </sp-action-button>
-      <sp-popover slot="click-content" tip>
-        <sp-menu
-          @change=${(e: Event) => {
-            const val = (e.target as unknown as HTMLInputElement).value;
-            if (val === "__new__") {
-              handleNewProject();
-            } else {
-              ctx.openRecentProject(val);
-            }
-          }}
-        >
-          <sp-menu-item value="__new__">New Project…</sp-menu-item>
-          ${recentProjects.length > 0
-            ? html`<sp-menu-divider></sp-menu-divider> ${recentProjects.map(
-                  (p) => html`<sp-menu-item value=${p.root}>${p.name}</sp-menu-item>`,
-                )}`
-            : nothing}
-        </sp-menu>
-      </sp-popover>
-    </overlay-trigger>
-  `;
+  const recentProjectsTpl = recentMenuTpl(ctx);
 
   return html`
     ${isMac ? csdTpl : nothing}
     <div class="tb-split-btn">
-      <sp-action-button size="s" class="tb-split-main" @click=${ctx.openProject}>
-        ${toolbarIconMap["sp-icon-folder-open"]} Open Project
+      <sp-action-button
+        size="s"
+        class="tb-split-main"
+        title="Open Project"
+        @click=${ctx.openProject}
+      >
+        ${toolbarIconMap["sp-icon-folder-open"]}<span class="tb-label">Open Project</span>
       </sp-action-button>
       ${recentProjectsTpl}
     </div>
     ${tbBtnTpl("Manage", openBrowseModal, "sp-icon-view-list")}
-    <sp-action-button size="s" ?disabled=${!canSave} @click=${ctx.saveFile}>
-      ${toolbarIconMap["sp-icon-save-floppy"]} Save
+    ${tbBtnTpl("Publish", openPublishPanel)}
+    <sp-action-button size="s" title="Save" ?disabled=${!canSave} @click=${ctx.saveFile}>
+      ${toolbarIconMap["sp-icon-save-floppy"]}<span class="tb-label">Save</span>
     </sp-action-button>
     <sp-action-group compact size="s">
-      <sp-action-button size="s" ?disabled=${!canUndo} @click=${() => tabUndo(activeTab.value!)}>
-        ${toolbarIconMap["sp-icon-undo"]} Undo
+      <sp-action-button
+        size="s"
+        title="Undo"
+        ?disabled=${!canUndo}
+        @click=${() => tabUndo(activeTab.value!)}
+      >
+        ${toolbarIconMap["sp-icon-undo"]}<span class="tb-label">Undo</span>
       </sp-action-button>
-      <sp-action-button size="s" ?disabled=${!canRedo} @click=${() => tabRedo(activeTab.value!)}>
-        ${toolbarIconMap["sp-icon-redo"]} Redo
+      <sp-action-button
+        size="s"
+        title="Redo"
+        ?disabled=${!canRedo}
+        @click=${() => tabRedo(activeTab.value!)}
+      >
+        ${toolbarIconMap["sp-icon-redo"]}<span class="tb-label">Redo</span>
       </sp-action-button>
     </sp-action-group>
+    ${presenceChipsTemplate(tab)}
     <div class="tb-spacer"></div>
-    <sp-action-button class="tb-search-trigger" size="s" quiet @click=${openQuickSearch}>
+    <sp-action-button
+      class="tb-search-trigger"
+      size="s"
+      quiet
+      title="Search files (⌘P)"
+      @click=${openQuickSearch}
+    >
       <sp-icon-search slot="icon"></sp-icon-search>
       <span class="tb-search-label">Search files… <kbd>⌘P</kbd></span>
     </sp-action-button>
     ${(activeTab.value?.session.ui.gitStatus?.behind ?? 0) > 0
       ? html`<sp-action-button
           size="s"
+          title="Sync Project"
           @click=${async () => {
             await getPlatform().gitPull();
             await refreshGitStatus();
           }}
         >
           <sp-icon-download slot="icon"></sp-icon-download>
-          Sync Project
+          <span class="tb-label">Sync Project</span>
         </sp-action-button>`
       : nothing}
     <div class="tb-spacer"></div>
-    ${breadcrumbTpl} ${togglesTpl} ${modeSwitcherTpl}
+    ${modeSwitcherTpl}
     <sp-action-button
       quiet
       size="s"

@@ -14,12 +14,15 @@ import { repeat } from "lit-html/directives/repeat.js";
 import { getPlatform } from "../platform";
 import { projectState } from "../store";
 import { yamlDefault } from "../settings/schema-field-ui";
+import type { SchemaProperty } from "../settings/schema-field-ui";
 import { invalidateMediaCache } from "../ui/media-picker";
 import { statusMessage } from "../panels/statusbar";
 import { componentRegistry } from "../files/components";
+import { rectOf } from "../utils/geometry";
 
 import { renderPopover, showDialog } from "../ui/layers";
-import { renderComponentPreview } from "../panels/stylebook-panel";
+import { loopbackAssetSrc } from "../canvas/canvas-origin";
+import { renderComponentPreview } from "../panels/component-preview";
 import { buildScope, renderNode, setSkipServerFunctions } from "@jxsuite/runtime";
 import { parseSourceForPath } from "../files/file-ops";
 import {
@@ -31,7 +34,7 @@ import {
 } from "../format/format-host";
 
 import type { ComponentEntry } from "../files/components";
-import type { ContentTypeDef } from "@jxsuite/schema/types";
+import type { ContentTypeDef, JxDocument } from "@jxsuite/schema/types";
 
 // ─── Category definitions ────────────────────────────────────────────────────
 
@@ -267,9 +270,9 @@ function buildFrontmatterYaml(contentTypeName: string) {
   }
 
   let yaml = "";
-  for (const [field, def] of Object.entries(col.schema.properties)) {
-    const d = /** @type {{ type?: string; format?: string }} */ def;
-    yaml += `${field}: ${yamlDefault(d.type || "", d.format || "")}\n`;
+  const props = col.schema.properties as Record<string, SchemaProperty>;
+  for (const [field, def] of Object.entries(props)) {
+    yaml += `${field}: ${yamlDefault(def.type || "", def.format || "")}\n`;
   }
   return yaml || "title: Untitled\n";
 }
@@ -311,7 +314,7 @@ function getContentTypeTypes() {
  */
 async function handleNewEntity(
   typeKey: string,
-  container: HTMLElement,
+  _container: HTMLElement,
   ctx: { openFile: (path: string) => void },
 ) {
   const isContentType = typeKey.startsWith("contentType:");
@@ -384,7 +387,7 @@ async function handleUpload(
   }
   invalidateBrowseCache();
   invalidateMediaCache();
-  renderBrowse(container, ctx);
+  void renderBrowse(container, ctx);
 }
 
 // ─── Context menu ───────────────────────────────────────────────────────────
@@ -447,7 +450,7 @@ function showBrowseContextMenu(
         }
         requestAnimationFrame(() => {
           const popover = el as HTMLElement;
-          const menuRect = popover.getBoundingClientRect();
+          const menuRect = rectOf(popover);
           if (x + menuRect.width > window.innerWidth) {
             x = window.innerWidth - menuRect.width - 4;
           }
@@ -467,7 +470,7 @@ function showBrowseContextMenu(
                 style=${item.danger ? "color: var(--danger)" : ""}
                 @click=${() => {
                   dismissBrowseContextMenu();
-                  item.action?.();
+                  void item.action?.();
                 }}
                 >${item.label}</sp-menu-item
               >`,
@@ -505,7 +508,7 @@ async function browseRenameFile(
     const platform = getPlatform();
     await platform.renameFile(file.path, newPath);
     invalidateBrowseCache();
-    renderBrowse(container, ctx);
+    void renderBrowse(container, ctx);
     statusMessage(`Renamed to ${newName}`);
   } catch (error) {
     statusMessage(`Error: ${errorMessage(error)}`);
@@ -533,7 +536,7 @@ async function browseDuplicateFile(
     const content = await platform.readFile(file.path);
     await platform.writeFile(copyPath, content);
     invalidateBrowseCache();
-    renderBrowse(container, ctx);
+    void renderBrowse(container, ctx);
     statusMessage(`Duplicated as ${copyName}`);
   } catch (error) {
     statusMessage(`Error: ${errorMessage(error)}`);
@@ -558,7 +561,7 @@ async function browseDeleteFile(
     const platform = getPlatform();
     await platform.deleteFile(file.path);
     invalidateBrowseCache();
-    renderBrowse(container, ctx);
+    void renderBrowse(container, ctx);
     statusMessage(`Deleted ${file.name}`);
   } catch (error) {
     statusMessage(`Error: ${errorMessage(error)}`);
@@ -669,9 +672,9 @@ async function renderDocPreview(filePath: string) {
     let doc;
     if (formatForPath(filePath)) {
       const result = await parseSourceForPath(filePath, content);
-      doc = result.document;
+      doc = result.document as JxDocument;
     } else {
-      doc = JSON.parse(content);
+      doc = JSON.parse(content) as JxDocument;
     }
     const scope = await buildScope(doc, {}, location.href);
     const el = renderNode(doc, scope);
@@ -693,6 +696,11 @@ async function loadPreview(el: Element, file: { path: string; category: string }
     return;
   }
 
+  // Component/doc previews instantiate a real runtime custom element that sets img.src verbatim to
+  // A relative path — not a direct-parent lit literal, so it cannot be pre-rewritten via
+  // LoopbackAssetSrc at this template layer. The desktop MutationObserver (plus activate()'s initial
+  // Sweep) still recovers these; the brief stray views:// request is a known cosmetic residual we
+  // Intentionally do NOT over-engineer with a per-component rewrite.
   let preview: HTMLElement | undefined = _previewCache.get(file.path);
   if (!preview) {
     try {
@@ -748,14 +756,14 @@ function renderCard(
         ${needsPreview
           ? ref((el: Element | undefined) => {
               if (el) {
-                loadPreview(el, file);
+                void loadPreview(el, file);
               }
             })
           : nothing}
       >
         ${isImg
           ? html`<img
-              src="/${file.path}"
+              src=${loopbackAssetSrc(`/${file.path}`)}
               style="max-width:100%;max-height:100%;object-fit:contain"
             />`
           : needsPreview
@@ -798,7 +806,7 @@ export async function renderBrowse(
             ?selected=${activeCategory === cat.key}
             @click=${() => {
               activeCategory = cat.key;
-              renderBrowse(container, ctx);
+              void renderBrowse(container, ctx);
             }}
           >
             ${cat.label}
@@ -812,7 +820,7 @@ export async function renderBrowse(
       .value=${searchQuery}
       @input=${(e: Event) => {
         searchQuery = (e.target as HTMLInputElement).value;
-        renderBrowse(container, ctx);
+        void renderBrowse(container, ctx);
       }}
       @submit=${(e: Event) => e.preventDefault()}
     ></sp-search>
@@ -856,7 +864,7 @@ export async function renderBrowse(
       @change=${(e: Event) => {
         const input = e.target as HTMLInputElement;
         if (input.files?.length) {
-          handleUpload(input.files, container, ctx);
+          void handleUpload(input.files, container, ctx);
         }
         input.value = "";
       }}
@@ -867,7 +875,7 @@ export async function renderBrowse(
         ?selected=${viewMode === "grid"}
         @click=${() => {
           viewMode = "grid";
-          renderBrowse(container, ctx);
+          void renderBrowse(container, ctx);
         }}
         title="Grid view"
       >
@@ -878,7 +886,7 @@ export async function renderBrowse(
         ?selected=${viewMode === "table"}
         @click=${() => {
           viewMode = "table";
-          renderBrowse(container, ctx);
+          void renderBrowse(container, ctx);
         }}
         title="Table view"
       >
@@ -915,7 +923,7 @@ export async function renderBrowse(
                 >
                   <sp-table-cell class="browse-name-cell"
                     >${isImage(f.ext)
-                      ? html`<img class="browse-thumb" src="/${f.path}" />`
+                      ? html`<img class="browse-thumb" src=${loopbackAssetSrc(`/${f.path}`)} />`
                       : nothing}${f.name}</sp-table-cell
                   >
                   <sp-table-cell>${f.category}</sp-table-cell>
@@ -956,7 +964,7 @@ export async function renderBrowse(
         (e.currentTarget as HTMLElement).classList.remove("browse-drop-active");
         const droppedFiles = e.dataTransfer?.files;
         if (droppedFiles?.length) {
-          handleUpload(droppedFiles, container, ctx);
+          void handleUpload(droppedFiles, container, ctx);
         }
       }}
     >

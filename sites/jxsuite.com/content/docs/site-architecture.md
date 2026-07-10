@@ -5,13 +5,15 @@ description: "File-based routing, layouts, content collections, and static site 
 
 # Site Architecture
 
+> **Studio manages this structure for you** — Manage maps to `pages/`, `components/`, and `content/`; the content-type builder writes `contentTypes`; the New Project deploy picker sets the adapter. This page documents the on-disk layout for reference.
+
 Jx sites follow a conventional directory structure for file-based routing, shared layouts, content collections, and static site generation.
 
 ## Project Structure
 
 ```
 my-site/
-├── site.json              # Site configuration (required)
+├── project.json           # Site configuration (required)
 ├── pages/                 # File-based routing (required)
 │   ├── index.json         # → /
 │   ├── about.json         # → /about
@@ -41,46 +43,51 @@ Every `.json` file in `pages/` becomes a route automatically:
 
 ## Layouts
 
-Layouts use HTML `<slot>` elements to mark where page content is injected:
+Layouts use HTML `<slot>` elements to mark where page content is injected. Components are
+registered via `$elements` (paths relative to the layout file) and used by tag name:
 
 ```json
 {
+  "$elements": [
+    { "$ref": "../components/site-header.json" },
+    { "$ref": "../components/site-footer.json" }
+  ],
   "tagName": "html",
   "children": [
     {
       "tagName": "body",
       "children": [
-        { "$ref": "../components/header.json" },
+        { "tagName": "site-header" },
         {
           "tagName": "main",
           "children": [{ "tagName": "slot" }]
         },
-        { "$ref": "../components/footer.json" }
+        { "tagName": "site-footer" }
       ]
     }
   ]
 }
 ```
 
-Pages declare their layout with `$layout`:
+Pages declare their layout with `$layout` — the path is resolved from the **project root**:
 
 ```json
 {
-  "$layout": "../layouts/base.json",
+  "$layout": "./layouts/base.json",
   "children": [{ "tagName": "h1", "textContent": "About Us" }]
 }
 ```
 
 ## Content Collections
 
-Define collections in `content/content.config.json` with JSON Schema validation:
+Define collections in the `contentTypes` block of your `project.json`, with JSON Schema validation. (In Studio, the content-type builder writes this for you.)
 
 ```json
 {
   "contentTypes": {
     "blog": {
       "source": "./content/blog/",
-      "format": "md",
+      "format": "Markdown",
       "schema": {
         "type": "object",
         "properties": {
@@ -111,19 +118,20 @@ Query collections in pages via `$prototype`:
 ## Build Pipeline
 
 ```
-site.json → Discover pages/ → Resolve routes → Compile each page → Emit dist/
+project.json → Discover pages/ → Resolve routes → Compile each page → Emit dist/
 ```
 
-All output is static HTML/CSS/JS. Deploy to any static host — Netlify, Vercel, Cloudflare Pages, or a plain web server. No server runtime required.
+Run it with `bunx jx build`. All output is static HTML, CSS, and minimal JS in `dist/` — deploy to any static host, no server runtime required. Studio doesn't run this step: it commits and pushes your source, and your host (or CI) builds on push. See [Git & publish](/docs/git-publish).
 
-## Deployment
+## Deployment adapters
 
-The build output supports platform-specific files:
+Set an adapter in `project.json` (Studio's New Project dialog picks it for you) to package the build for your target:
 
-| Platform         | Extra Output             |
-| ---------------- | ------------------------ |
-| Generic          | `dist/` with HTML/CSS/JS |
-| Netlify          | `_redirects`, `_headers` |
-| Vercel           | `vercel.json`            |
-| Cloudflare Pages | `_redirects`, `_headers` |
-| GitHub Pages     | `.nojekyll`, `404.html`  |
+| Adapter        | Target                                               |
+| -------------- | ---------------------------------------------------- |
+| **Static**     | Plain `dist/` HTML/CSS/JS for any static host or CDN |
+| **Cloudflare** | Cloudflare Pages                                     |
+| **Node**       | A Node server bundle                                 |
+| **Bun**        | A Bun server bundle                                  |
+
+Switching hosts means switching the adapter — your source never changes.

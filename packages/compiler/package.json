@@ -1,6 +1,6 @@
 {
   "name": "@jxsuite/compiler",
-  "version": "0.28.5",
+  "version": "0.35.0",
   "description": "Jx static HTML compiler, island detector, and site builder",
   "license": "MIT",
   "repository": {
@@ -35,20 +35,21 @@
   "scripts": {
     "prepare": "bun build src/compiler.ts src/cli.ts --outdir=dist --format=esm --minify --target=node",
     "build": "bun run prepare",
+    "build:metafile": "bun build src/compiler.ts src/cli.ts --outdir=dist --format=esm --minify --target=node --metafile=metafile.json",
     "build:site": "bun src/cli.ts build",
     "test": "bun test --isolate",
     "test:coverage": "bun test --isolate --coverage",
     "upgrade": "bunx npm-check-updates -u && bun install"
   },
   "dependencies": {
-    "@apidevtools/json-schema-ref-parser": "^15.3.6",
+    "@apidevtools/json-schema-ref-parser": "^15.4.0",
     "@jxsuite/parser": "workspace:^",
     "@jxsuite/runtime": "workspace:^",
     "@jxsuite/schema": "workspace:^",
-    "sharp": "^0.35.1"
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
-    "@happy-dom/global-registrator": "^20.10.2",
+    "@happy-dom/global-registrator": "^20.10.6",
     "@types/mdast": "^4.0.4"
   }
 }

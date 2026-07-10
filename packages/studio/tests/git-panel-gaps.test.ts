@@ -23,13 +23,13 @@ let confirmResult = true;
 let publishCalls: unknown[] = [];
 let dialogHosts: HTMLElement[] = [];
 
-mock.module("../src/platform.js", () => ({
+void mock.module("../src/platform.js", () => ({
   getPlatform: () => mockPlatform,
   hasPlatform: () => true,
   registerPlatform: () => {},
 }));
 
-mock.module("../src/workspace/workspace.js", () => ({
+void mock.module("../src/workspace/workspace.js", () => ({
   activeTab: activeTabRef,
   closeAllTabs: () => {},
   closeTab: () => {},
@@ -37,11 +37,11 @@ mock.module("../src/workspace/workspace.js", () => ({
   renameTab: () => {},
 }));
 
-mock.module("../src/view.js", () => ({
+void mock.module("../src/view.js", () => ({
   view: viewObj,
 }));
 
-mock.module("../src/ui/layers.js", () => ({
+void mock.module("../src/ui/layers.js", () => ({
   showConfirmDialog: async (headline: string) => {
     confirmCalls.push(headline);
     return confirmResult;
@@ -61,14 +61,27 @@ mock.module("../src/ui/layers.js", () => ({
     }),
 }));
 
-mock.module("../src/panels/statusbar.js", () => ({
+void mock.module("../src/panels/statusbar.js", () => ({
   statusMessage: (msg: string) => statusMessages.push(msg),
 }));
 
-mock.module("../src/github/github-publish.js", () => ({
+void mock.module("../src/github/github-publish.js", () => ({
   publishToGithub: async (opts: unknown) => {
     publishCalls.push(opts);
     return true;
+  },
+}));
+
+let pullSyncCalls = 0;
+let pullSyncImpl: () => Promise<void> = async () => {};
+
+void mock.module("../src/packages/pull-package-sync.js", () => ({
+  autoSyncProjectOnOpen: async () => {},
+  isAutomatedPackageDiff: () => false,
+  planPackageDiscard: async () => ({ automated: true, discard: [], removeUntracked: [] }),
+  pullWithPackageSync: () => {
+    pullSyncCalls += 1;
+    return pullSyncImpl();
   },
 }));
 
@@ -178,6 +191,8 @@ beforeEach(() => {
   dialogHosts = [];
   viewObj.leftTab = "git";
   mockPlatform = freshPlatform();
+  pullSyncCalls = 0;
+  pullSyncImpl = async () => {};
   setProjectState({ name: "proj" });
   cleanupGitPanel();
 });
@@ -390,9 +405,24 @@ describe("sync bar actions", () => {
     await flush();
     const names = callNames();
     expect(names).toContain("gitFetch");
-    expect(names).toContain("gitPull");
     expect(names).toContain("gitPush");
+    // Pull goes through the package-aware orchestrator, not a raw platform gitPull.
+    expect(pullSyncCalls).toBe(1);
+    expect(names).not.toContain("gitPull");
     expect(names.filter((n) => n === "gitStatus").length).toBe(3);
+  });
+
+  test("failing pull records error and stops loading", async () => {
+    seedRepoUi();
+    pullSyncImpl = async () => {
+      throw new Error("pull broke");
+    };
+    const div = renderPanel();
+    click(div.querySelector('[title^="Pull"]'));
+    await flush();
+    expect(pullSyncCalls).toBe(1);
+    expect(String(ui.gitError)).toContain("pull broke");
+    expect(ui.gitLoading).toBe(false);
   });
 
   test("failing git action records error and stops loading", async () => {

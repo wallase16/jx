@@ -2,15 +2,23 @@
 /// <reference lib="dom.iterable" />
 import { Electroview } from "electrobun/view";
 import { html, render as litRender } from "lit-html";
-import type { StudioRPC } from "./rpc-schema";
+import { streamImport } from "@jxsuite/studio/import-client";
+import type { RecentProjectEntry, StudioRPC } from "./rpc-schema";
+import type { ImportProgressEvent, ImportSiteOptions } from "@jxsuite/studio/types";
 import type { ProjectConfig } from "@jxsuite/schema/types";
+import type { FsEventPayload } from "@jxsuite/server/refactor";
 
 export function createDesktopPlatform() {
+  // The studio sidebar's live-sync subscriber, if any. Set via subscribeFileEvents below.
+  let fileEventHandler: ((events: FsEventPayload[]) => void) | null = null;
   const rpc = Electroview.defineRPC<StudioRPC>({
     handlers: {
       messages: {
         fileChanged: (payload) => {
           console.log("[desktop] File changed:", payload.path);
+        },
+        onFileEvents: (payload) => {
+          fileEventHandler?.(payload.events);
         },
         updateReady: (payload) => {
           showUpdateToast(payload.version, rpc);
@@ -64,44 +72,32 @@ export function createDesktopPlatform() {
       }
     }
 
-    if (url.startsWith("views://")) {
-      const path = url.replace(/^views:\/\/[^/]+\//, "");
-      try {
-        const content = await rpc.request.readFile({ path });
-        const ext = path.split(".").pop() || "";
-        const mime = ext === "json" ? "application/json" : "text/plain";
-        return new Response(content as string, {
-          headers: { "content-type": mime },
-          status: 200,
-        });
-      } catch {
-        try {
-          const content = await rpc.request.readFile({
-            path: `public/${path}`,
-          });
-          const ext = path.split(".").pop() || "";
-          const mime = ext === "json" ? "application/json" : "text/plain";
-          return new Response(content as string, {
-            headers: { "content-type": mime },
-            status: 200,
-          });
-        } catch {
-          return new Response("Not Found", { status: 404 });
-        }
-      }
-    }
     return originalFetch(input, init);
   };
 
   // ─── Global MutationObserver: resolve relative asset URLs everywhere ────────
   // Catches <img src>, <video src>, <source src>, <video poster> in any part of
   // The DOM (canvas, panels, dropdowns, etc.) so we don't need per-component fixes.
-  const resolving = new WeakSet<Element>();
+  //
+  // The shell document lives on views://; a relative PANEL asset src there does not resolve to a
+  // Servable URL, so the observer rewrites it to ${loopbackOrigin()}/<path> — an absolute URL on the
+  // Per-window loopback server (a cross-origin <img> load, which needs NO CORS). loopbackOrigin() is
+  // The canvas origin from platform.canvasUrl (always set once activate() resolves); if it is not yet
+  // Resolved at boot, the observer no-ops that one mutation rather than rewriting it.
+  function loopbackOrigin(): string | null {
+    const { canvasUrl } = platform;
+    if (!canvasUrl) {
+      return null;
+    }
+    try {
+      const { protocol, origin } = new URL(canvasUrl, location.href);
+      return protocol === "http:" || protocol === "https:" ? origin : null;
+    } catch {
+      return null;
+    }
+  }
 
   function resolveElementAssets(el: Element) {
-    if (resolving.has(el)) {
-      return;
-    }
     const tag = el.tagName;
     if (tag !== "IMG" && tag !== "VIDEO" && tag !== "SOURCE") {
       return;
@@ -116,18 +112,15 @@ export function createDesktopPlatform() {
         !val.startsWith("http") &&
         !val.startsWith("views://")
       ) {
-        resolving.add(el);
-        el.removeAttribute(attr);
+        const origin = loopbackOrigin();
+        if (!origin) {
+          // The canvas origin isn't resolved yet (pre-activate) — leave this mutation untouched.
+          continue;
+        }
+        // Point the panel <img> straight at the loopback server (a cross-origin image load,
+        // Allowed without CORS).
         const path = val.replace(/^\.?\//, "");
-        rpc.request
-          .readFileAsDataUrl({ path })
-          .then((dataUrl: string) => {
-            if (dataUrl) {
-              el.setAttribute(attr, dataUrl);
-            }
-          })
-          .catch(() => {})
-          .finally(() => resolving.delete(el));
+        el.setAttribute(attr, `${origin}/${path}`);
       }
     }
   }
@@ -149,15 +142,14 @@ export function createDesktopPlatform() {
     if (val.startsWith("data:") || val.startsWith("blob:") || val.startsWith("http")) {
       return;
     }
+    const origin = loopbackOrigin();
+    if (!origin) {
+      // The canvas origin isn't resolved yet (pre-activate) — leave this mutation untouched.
+      return;
+    }
+    // Rewrite the background-image url() to the loopback origin (a cross-origin image load).
     const path = val.replace(/^\.?\//, "");
-    rpc.request
-      .readFileAsDataUrl({ path })
-      .then((dataUrl: string) => {
-        if (dataUrl) {
-          htmlEl.style.backgroundImage = `url(${dataUrl})`;
-        }
-      })
-      .catch(() => {});
+    htmlEl.style.backgroundImage = `url(${origin}/${path})`;
   }
 
   function resolveAllAssets(el: Element) {
@@ -198,13 +190,40 @@ export function createDesktopPlatform() {
     subtree: true,
   });
 
-  return {
+  const platform = {
     id: "desktop" as const,
 
     projectRoot: "",
 
+    /**
+     * The cross-origin loopback canvas URL for this window, fetched in {@link activate} (awaited at
+     * studio boot, before the first canvas mount). The iframe-host resolves the iframe `src`
+     * against it, and the asset observer rewrites relative panel asset srcs to this origin.
+     */
+    canvasUrl: undefined as string | undefined,
+
     async activate() {
-      /* No-op */
+      // Request this window's loopback canvas URL over RPC (kills the preload/executeJavascript
+      // Race), so it's set before the first canvas mount and the asset observer's first rewrite.
+      try {
+        const { canvasUrl } = await rpc.request.getCanvasUrl();
+        platform.canvasUrl = canvasUrl ?? undefined;
+      } catch (error) {
+        console.warn("getCanvasUrl RPC failed; canvas falls back to the default URL:", error);
+      }
+      // Synchronous initial sweep AFTER canvasUrl resolves: imgs mounted before activate() awaited
+      // Carry relative srcs (a stray views:// request). Rewrite them to the loopback origin now
+      // Instead of waiting for the next mutation, then drain any records the observer already
+      // Batched pre-activate so they aren't reprocessed. Wrapped so a sweep failure can't break
+      // Activate.
+      try {
+        if (loopbackOrigin()) {
+          resolveAllAssets(document.documentElement);
+          observer.takeRecords();
+        }
+      } catch (error) {
+        console.warn("initial asset sweep failed:", error);
+      }
     },
 
     async openProject() {
@@ -212,17 +231,68 @@ export function createDesktopPlatform() {
       return res;
     },
 
+    // ─── Multi-window ──────────────────────────────────────────────────────────
+
+    async openProjectInNewWindow(root: string) {
+      await rpc.request.openProjectInNewWindow({ root });
+    },
+
+    async newWindow() {
+      await rpc.request.newWindow();
+    },
+
+    async setWindowProject(root: string) {
+      return rpc.request.setWindowProject({ root });
+    },
+
+    async getProjectRoot() {
+      return rpc.request.getProjectRoot();
+    },
+
+    // ─── Recent projects (process-shared, user-level store) ─────────────────────
+
+    async getRecentProjects() {
+      return rpc.request.getRecentProjects();
+    },
+
+    async saveRecentProjects(projects: RecentProjectEntry[]) {
+      await rpc.request.saveRecentProjects({ projects });
+    },
+
+    // ─── User settings (process-shared, user-level store) ───────────────────────
+
+    async getSettings() {
+      return rpc.request.getSettings();
+    },
+
+    async saveSettings(settings: Record<string, string>) {
+      await rpc.request.saveSettings({ settings });
+    },
+
     async probeRootProject() {
+      // A fresh welcome window owns a session with no project root. Report "no project" (null) so the
+      // Studio shows the welcome screen — returning a phantom non-site project instead would suppress
+      // The welcome screen and trigger a spurious "No project open" error from listFormats.
+      let root: string | null = null;
+      try {
+        ({ root } = await rpc.request.getProjectRoot());
+      } catch {
+        root = null;
+      }
+      if (!root) {
+        return null;
+      }
       try {
         const content = await rpc.request.readFile({ path: "project.json" });
         const config = JSON.parse(content as string) as ProjectConfig;
+        // `root` (the absolute backend root) is already resolved above and is the re-openable key.
         return {
           info: {
             directories: [] as string[],
             isSiteProject: true as const,
             projectConfig: config,
           },
-          meta: { name: config.name || "project", root: "." },
+          meta: { name: config.name || "project", root },
         };
       } catch {
         return {
@@ -248,14 +318,6 @@ export function createDesktopPlatform() {
       return rpc.request.readFile({ path });
     },
 
-    async resolveAssetUrl(path: string): Promise<string | null> {
-      try {
-        return await rpc.request.readFileAsDataUrl({ path });
-      } catch {
-        return null;
-      }
-    },
-
     async writeFile(path: string, content: string) {
       return rpc.request.writeFile({ content, path });
     },
@@ -270,6 +332,15 @@ export function createDesktopPlatform() {
 
     async renameFile(from: string, to: string) {
       return rpc.request.renameFile({ from, to });
+    },
+
+    subscribeFileEvents(handler: (events: FsEventPayload[]) => void) {
+      fileEventHandler = handler;
+      return () => {
+        if (fileEventHandler === handler) {
+          fileEventHandler = null;
+        }
+      };
     },
 
     async createDirectory(path: string) {
@@ -368,6 +439,22 @@ export function createDesktopPlatform() {
       return rpc.request.listFormats();
     },
 
+    /**
+     * Class resolution via the shared dev-proxy pipeline (the same handler the canvas runtime
+     * reaches through the fetch patch above), called directly over RPC.
+     *
+     * @param {Record<string, unknown>} body
+     */
+    async resolveClass(body: Record<string, unknown>) {
+      const { status, body: resBody } = await rpc.request.jxResolve({
+        body: JSON.stringify(body),
+      });
+      if (status >= 400) {
+        throw new Error(`Class resolution failed: ${status}`);
+      }
+      return JSON.parse(resBody) as unknown;
+    },
+
     /** @param {Record<string, unknown>} payload */
     async formatAction(payload: Record<string, unknown>) {
       return rpc.request.formatAction(
@@ -387,17 +474,95 @@ export function createDesktopPlatform() {
       return rpc.request.listPackages();
     },
 
+    async installDependencies() {
+      return rpc.request.installDependencies();
+    },
+
+    async dependenciesNeedInstall() {
+      return rpc.request.dependenciesNeedInstall();
+    },
+
+    async outdatedPackages() {
+      return rpc.request.outdatedPackages();
+    },
+
+    async setPackageVersions(updates: { name: string; version: string; dev?: boolean }[]) {
+      return rpc.request.setPackageVersions({ updates });
+    },
+
+    async getAppInfo() {
+      const info = await rpc.request.updaterGetLocalInfo();
+      let updateStatus: string | undefined;
+      try {
+        const status = await rpc.request.updaterGetStatus();
+        updateStatus = status.error
+          ? `Update check failed: ${status.error}`
+          : status.updateReady
+            ? `Update ready (${status.version ?? "?"})`
+            : status.updateAvailable
+              ? `Update available (${status.version ?? "?"})`
+              : "Up to date";
+      } catch {
+        // Status is best-effort; omit it if the updater isn't reachable.
+      }
+      return {
+        version: info.version,
+        channel: info.channel,
+        hash: info.hash,
+        ...(updateStatus === undefined ? {} : { updateStatus }),
+      };
+    },
+
     async createProject(opts: {
       name: string;
       description?: string;
       url?: string;
       adapter?: string;
       directory: string;
+      starter?: string;
+      template?: string;
+      design?: {
+        accent?: string;
+        background?: string;
+        text?: string;
+        bodyFont?: string;
+        headingFont?: string;
+        media?: Record<string, string>;
+        logo?: { name: string; base64: string };
+      };
     }) {
       return rpc.request.createProject(opts) as Promise<{
         root: string;
         config: ProjectConfig;
       }>;
+    },
+
+    async listStarters() {
+      return rpc.request.listStarters();
+    },
+
+    async pickDirectory() {
+      const result = await rpc.request.pickDirectory();
+      return result.path;
+    },
+
+    // AI-guided site import: streams NDJSON progress from the token-gated shared local server. A
+    // Relative directory (the modal's slug) is resolved under a natively-picked parent folder.
+    async importSite(
+      opts: ImportSiteOptions,
+      onProgress: (evt: ImportProgressEvent) => void,
+      signal?: AbortSignal,
+    ) {
+      let { directory } = opts;
+      if (!/^(?:[a-zA-Z]:[\\/]|\/)/.test(directory)) {
+        const parent = await rpc.request.pickDirectory();
+        if (!parent.path) {
+          throw new Error("No destination folder was selected.");
+        }
+        directory = `${parent.path}/${directory}`;
+      }
+      const endpoint = (await rpc.request.importSiteUrl()) as string;
+      return streamImport(endpoint, { ...opts, directory }, onProgress, signal);
     },
 
     updater: {
@@ -417,29 +582,13 @@ export function createDesktopPlatform() {
         rpc.request.windowSetFrame({ height: h, width: w, x, y }),
     },
 
-    // AI Assistant
-    async aiAuthStatus() {
-      return rpc.request.aiAuthStatus() as Promise<{
-        authenticated: boolean;
-        error?: string;
-      }>;
-    },
-    async aiCreateSession(opts: { message: string; systemPrompt?: string }) {
-      return rpc.request.aiCreateSession(opts) as Promise<{ id: string }>;
-    },
-    async aiSendMessage(id: string, message: string) {
-      await rpc.request.aiSendMessage({ id, message });
-    },
-    aiStreamUrl(id: string) {
-      return rpc.request.aiStreamUrl({ id }) as Promise<string>;
-    },
-    async aiStopSession(id: string) {
-      await rpc.request.aiStopSession({ id });
-    },
-    async aiDeleteSession(id: string) {
-      await rpc.request.aiDeleteSession({ id });
+    // AI Assistant (Stack B: absolute SSE proxy URL from the shared local server, via RPC)
+    async aiChatUrl() {
+      return rpc.request.aiChatUrl() as Promise<string>;
     },
   };
+
+  return platform;
 }
 
 function showUpdateToast(version: string, rpc: { request: { updaterApplyUpdate: () => unknown } }) {

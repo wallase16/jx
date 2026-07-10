@@ -10,8 +10,10 @@ import { html, render as litRender, nothing } from "lit-html";
 import { live } from "lit-html/directives/live.js";
 import { ref } from "lit-html/directives/ref.js";
 import { getPlatform } from "../platform";
-import { debouncedStyleCommit } from "../store";
+import { debouncedStyleCommit, renderOnly } from "../store";
 import { getLayerSlot } from "./layers";
+import { rectOf } from "../utils/geometry";
+import { loopbackAssetSrc } from "../canvas/canvas-origin";
 
 // ─── Media file cache ────────────────────────────────────────────────────────
 
@@ -88,6 +90,10 @@ async function loadMediaCache() {
     m.path = m.path.replace(/^\/public\//, "/");
   }
   mediaCacheLoaded = true;
+  // Re-render the host panels so the Browse button (gated on mediaCache.length) appears once the
+  // Async listing resolves — including when an image value is already set, so the current image can
+  // Be replaced. Mirrors loadLayoutEntries()'s renderOnly() in head-panel.
+  renderOnly("leftPanel", "rightPanel");
 }
 
 /** Force media cache reload (e.g. after upload). */
@@ -138,7 +144,7 @@ function onPopoverOutsideClick(e: MouseEvent) {
 
 function renderMediaPickerPopover() {
   const host = getLayerSlot("popover", "media-picker");
-  const rect = _popoverAnchorEl?.getBoundingClientRect();
+  const rect = _popoverAnchorEl ? rectOf(_popoverAnchorEl) : undefined;
   if (!rect) {
     return;
   }
@@ -206,9 +212,9 @@ function renderMediaPickerPopover() {
                     ${m.isImage
                       ? html`<img
                           slot="icon"
-                          src=${m.path}
+                          src=${loopbackAssetSrc(m.path)}
                           alt=""
-                          style="width:24px;height:24px;object-fit:cover;border-radius:2px"
+                          style="width:24px;height:24px;object-fit:cover;border-radius:var(--spectrum-corner-radius-75, 2px)"
                         />`
                       : nothing}
                     ${m.name}
@@ -228,7 +234,7 @@ function renderMediaPickerPopover() {
   // Fine-tune position after render using actual measured dimensions
   requestAnimationFrame(() => {
     if (_popoverEl) {
-      const popoverRect = _popoverEl.getBoundingClientRect();
+      const popoverRect = rectOf(_popoverEl);
       let adjLeft = popoverRect.left;
       let adjTop = popoverRect.top;
       let needsAdjust = false;
@@ -290,7 +296,7 @@ function showMediaPickerPopover(anchorEl: HTMLElement, onCommit: (val: string) =
  */
 export function renderMediaPicker(prop: string, value: string, onCommit: (val: string) => void) {
   // Kick off async load (won't block render)
-  loadMediaCache();
+  void loadMediaCache();
 
   const currentValue = value || "";
   const isImage = IMAGE_EXTENSIONS.has(
@@ -300,7 +306,7 @@ export function renderMediaPicker(prop: string, value: string, onCommit: (val: s
   return html`
     <div class="media-picker">
       ${isImage && currentValue
-        ? html`<img class="media-picker-thumb" src=${currentValue} alt="" />`
+        ? html`<img class="media-picker-thumb" src=${loopbackAssetSrc(currentValue)} alt="" />`
         : nothing}
       <sp-textfield
         size="s"
@@ -318,7 +324,7 @@ export function renderMediaPicker(prop: string, value: string, onCommit: (val: s
               quiet
               title="Browse media"
               @click=${(e: MouseEvent) => {
-                loadMediaCache();
+                void loadMediaCache();
                 showMediaPickerPopover(e.currentTarget as HTMLElement, onCommit);
               }}
             >

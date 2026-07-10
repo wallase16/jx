@@ -14,7 +14,6 @@ import {
 
 import { jxKey, mdKey } from "../src/transpile";
 
-const __filename = import.meta.filename;
 const __dirname = import.meta.dirname;
 const EXAMPLES_DIR = join(__dirname, "..", "..", "..", "examples");
 
@@ -562,8 +561,10 @@ state:
     const doc = transpileJxMarkdown(source) as any;
 
     expect(doc.$schema).toBe("https://jxsuite.com/schema/v1");
-    expect(doc.$id).toBe("TodoApp");
-    expect(doc.tagName).toBe("todo-app");
+    // The markdown twin of components/todo-app.json carries its own tag/$id so both can register
+    // As custom elements in the same project (componentDefs are keyed by tagName).
+    expect(doc.$id).toBe("MarkdownTodoApp");
+    expect(doc.tagName).toBe("markdown-todo-app");
     expect(doc.$media).toBeDefined();
     expect(doc.state.items.$prototype).toBe("LocalStorage");
     expect(doc.state.addItem.$prototype).toBe("Function");

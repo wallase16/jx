@@ -5,29 +5,36 @@ import type { StudioPlatform } from "../src/types";
 
 let mockPlatform: Partial<StudioPlatform>;
 
-mock.module("../src/platform.js", () => ({
+void mock.module("../src/platform.js", () => ({
   getPlatform: () => mockPlatform,
   registerPlatform: () => {},
 }));
 
-mock.module("../src/workspace/workspace.js", () => ({
+void mock.module("../src/workspace/workspace.js", () => ({
   activeTab: { value: null },
   closeTab: () => {},
   openTab: () => {},
   renameTab: () => {},
 }));
 
-mock.module("../src/view.js", () => ({
+void mock.module("../src/view.js", () => ({
   view: { leftTab: "git" },
 }));
 
-mock.module("../src/ui/layers.js", () => ({
+void mock.module("../src/ui/layers.js", () => ({
   showConfirmDialog: async () => true,
   showDialog: async () => null,
 }));
 
-mock.module("../src/panels/statusbar.js", () => ({
+void mock.module("../src/panels/statusbar.js", () => ({
   statusMessage: () => {},
+}));
+
+void mock.module("../src/packages/pull-package-sync.js", () => ({
+  autoSyncProjectOnOpen: async () => {},
+  isAutomatedPackageDiff: () => false,
+  planPackageDiscard: async () => ({ automated: true, discard: [], removeUntracked: [] }),
+  pullWithPackageSync: async () => {},
 }));
 
 const { setProjectState } = (await import("../src/state.js")) as any;

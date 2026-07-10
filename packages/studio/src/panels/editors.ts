@@ -38,8 +38,7 @@ function getFunctionBody(editing: EditingTarget | null | undefined) {
   return "";
 }
 
-/** @param {() => void} closeFunctionEditor */
-export function renderFunctionEditor(closeFunctionEditor: () => void) {
+export function renderFunctionEditor() {
   const editing = activeTab.value?.session.ui.editingFunction as EditingTarget | null | undefined;
 
   // If editor already exists and matches current target, just sync value
@@ -79,27 +78,10 @@ export function renderFunctionEditor(closeFunctionEditor: () => void) {
   canvasWrap.style.flexDirection = "column";
   canvasWrap.style.alignItems = "stretch";
 
-  // Toolbar breadcrumb handles context display — re-render it
-  renderOnly("toolbar");
-
-  const tab = activeTab.value;
-  const docName = tab?.documentPath?.split("/").pop() || tab?.doc.document?.tagName || "document";
-  const ed = editing as EditingTarget;
-  const funcLabel = ed.type === "def" ? `ƒ ${ed.defName}` : `ƒ ${ed.eventKey}`;
-
-  // Editor container
+  // The tab bar renders the Back button + breadcrumb context for the function editor.
   let editorContainer: HTMLDivElement | null = null;
   litRender(
     html`<div class="source-wrap">
-      <div class="source-toolbar">
-        <sp-action-button size="s" @click=${closeFunctionEditor}>
-          <sp-icon-back slot="icon"></sp-icon-back>
-          Back
-        </sp-action-button>
-        <span class="breadcrumb-item">${docName}</span>
-        <span class="breadcrumb-sep"> › </span>
-        <span class="breadcrumb-item current">${funcLabel}</span>
-      </div>
       <div
         class="source-editor"
         ${ref((el) => {
@@ -120,7 +102,7 @@ export function renderFunctionEditor(closeFunctionEditor: () => void) {
 
   view.functionEditor = monaco.editor.create(editorContainer as unknown as HTMLElement, {
     automaticLayout: true,
-    fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
+    fontFamily: "'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace",
     fontSize: 12,
     language: "javascript",
     lineNumbers: "on",
@@ -135,13 +117,13 @@ export function renderFunctionEditor(closeFunctionEditor: () => void) {
   const editor = view.functionEditor;
 
   // Format on open — show pretty-printed code, then run initial lint
-  codeService("format", { args, code: body }).then((result) => {
+  void codeService("format", { args, code: body }).then((result) => {
     if (result?.code != null && view.functionEditor) {
       view.functionEditor._ignoreNextChange = true;
       view.functionEditor.setValue(result.code);
     }
   });
-  codeService("lint", { args, code: body }).then((result) => {
+  void codeService("lint", { args, code: body }).then((result) => {
     if (result?.diagnostics && view.functionEditor) {
       setLintMarkers(view.functionEditor, result.diagnostics as OxLintDiagnostic[]);
     }
@@ -183,7 +165,7 @@ export function renderFunctionEditor(closeFunctionEditor: () => void) {
     lintDebounce = setTimeout(() => {
       const gen = (lintGen += 1);
       const currentCode = editor.getValue();
-      codeService("lint", { args, code: currentCode }).then((result) => {
+      void codeService("lint", { args, code: currentCode }).then((result) => {
         if (gen !== lintGen) {
           return;
         }

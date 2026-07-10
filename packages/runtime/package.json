@@ -1,6 +1,6 @@
 {
   "name": "@jxsuite/runtime",
-  "version": "0.28.5",
+  "version": "0.34.2",
   "description": "JSON-native reactive web component runtime",
   "license": "MIT",
   "repository": {
@@ -23,15 +23,16 @@
   },
   "scripts": {
     "build": "bun build ./src/runtime.ts --outdir dist --target browser --sourcemap=linked",
+    "build:metafile": "bun build ./src/runtime.ts --outdir dist --target browser --sourcemap=linked --metafile=metafile.json",
     "test": "bun test --isolate",
     "test:coverage": "bun test --isolate --coverage",
     "upgrade": "bunx npm-check-updates -u && bun install"
   },
   "dependencies": {
     "@jxsuite/schema": "workspace:^",
-    "@vue/reactivity": "^3.5.38"
+    "@vue/reactivity": "^3.5.39"
   },
   "devDependencies": {
-    "@happy-dom/global-registrator": "^20.10.2"
+    "@happy-dom/global-registrator": "^20.10.6"
   }
 }

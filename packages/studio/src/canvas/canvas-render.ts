@@ -5,12 +5,14 @@
  */
 
 import { html, render as litRender, nothing } from "lit-html";
-import { errorMessage } from "@jxsuite/schema/parse";
 import { ref } from "lit-html/directives/ref.js";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 
 import { canvasPanels, canvasWrap, updateCanvas } from "../store";
 import { activeTab } from "../workspace/workspace";
+import { collabSourceContext } from "../collab/collab-session";
+import { attachCursorStyles } from "../collab/monaco-cursors";
+import type { AwarenessLike } from "../collab/monaco-cursors";
 import { view } from "../view";
 import { parseSourceForPath, serializeDocument } from "../files/file-ops";
 import { formatByName, formatForPath } from "../format/format-host";
@@ -24,23 +26,16 @@ import {
   resetZoomIndicator,
   updateActivePanelHeaders,
 } from "./canvas-utils";
-import { effectiveZoom, findCanvasElement, overlayBoxDescriptor } from "./canvas-helpers";
+import { parseMediaEntries } from "../utils/canvas-media";
+import { getEffectiveMedia, getEffectiveStyle } from "../site-context";
 import {
-  activeBreakpointsForWidth,
-  applyOverridesToCanvas,
-  collectMediaOverrides,
-  parseMediaEntries,
-} from "../utils/canvas-media";
-import { getEffectiveMedia } from "../site-context";
-import { renderCanvasLive } from "./canvas-live-render";
+  commitActiveEditSession,
+  mountIframeCanvas,
+  postStyleUpdateToStylebookHosts,
+} from "./iframe-host";
 import { canvasPerf } from "./canvas-perf";
-import { renderCanvasNode } from "../panels/preview-render";
-import { registerPanelDnD } from "../panels/canvas-dnd";
-import { registerPanelEvents } from "../panels/panel-events";
-import { computeDocumentDiff } from "./canvas-diff";
-import { updateForcedPseudoPreview } from "../panels/pseudo-preview";
-import { enterComponentInlineEdit } from "../editor/component-inline-edit";
-import { refreshStylebookStyles, renderStylebookMode } from "../panels/stylebook-panel";
+import { renderStylebookMode } from "../panels/stylebook-panel";
+import { transposeStylebookStyle } from "../panels/stylebook-doc";
 import { dismissBlockActionBar, dismissLinkPopover } from "../panels/block-action-bar";
 import { dismissContextMenu } from "../editor/context-menu";
 import { dismissSlashMenu } from "../editor/slash-menu";
@@ -49,8 +44,7 @@ import { mediaDisplayName } from "../panels/shared";
 import { statusMessage } from "../panels/statusbar";
 import * as overlaysPanel from "../panels/overlays";
 
-import type { CanvasPanel } from "../panels/canvas-dnd";
-import type { GitDiffState, InlineEditDef } from "../types";
+import type { CanvasPanel, GitDiffState } from "../types";
 import type { JxMutableNode } from "@jxsuite/schema/types";
 import type { Tab } from "../tabs/tab.js";
 
@@ -58,8 +52,6 @@ interface CanvasRenderCtx {
   getCanvasMode: () => string;
   setCanvasMode: (mode: string) => void;
   openFileFromTree: (path: string) => void;
-  exportFile: () => void;
-  closeFunctionEditor: () => void;
   gitDiffState: GitDiffState | null;
   setGitDiffState: (state: GitDiffState | null) => void;
 }
@@ -141,11 +133,48 @@ function hardClearCanvasWrap() {
  * the very next render is treated as a fresh mode transition and rebuilds the surface from
  * scratch.
  */
+/** Live source-mode collab binding teardown (unbind + release the canonical lock). */
+let sourceCollabCleanup: (() => void) | null = null;
+
+function disposeSourceCollab(): void {
+  sourceCollabCleanup?.();
+  sourceCollabCleanup = null;
+}
+
+/**
+ * Bind the Monaco editor to the shared source text via y-monaco: two-way character-level sync plus
+ * remote in-buffer cursors/selections (decorated per-client; colors injected from the presence
+ * palette by {@link attachCursorStyles}). y-monaco/yjs evaluation defers behind the dynamic import
+ * until a code view actually binds. Returns the teardown.
+ */
+async function createSourceCollabBinding(
+  model: monaco.editor.ITextModel,
+  editor: monaco.editor.IStandaloneCodeEditor,
+  ctx: NonNullable<ReturnType<typeof collabSourceContext>>,
+): Promise<() => void> {
+  const { MonacoBinding } = await import("y-monaco");
+  type YText = ConstructorParameters<typeof MonacoBinding>[0];
+  type BindingAwareness = ConstructorParameters<typeof MonacoBinding>[3];
+  const binding = new MonacoBinding(
+    ctx.text as YText,
+    model,
+    new Set([editor]),
+    ctx.awareness as BindingAwareness,
+  );
+  const detachStyles = attachCursorStyles(ctx.awareness as unknown as AwarenessLike, document);
+  return () => {
+    detachStyles();
+    binding.destroy();
+    ctx.leave();
+  };
+}
+
 function resetCanvasView() {
   if (view.functionEditor) {
     view.functionEditor.dispose();
     view.functionEditor = null;
   }
+  disposeSourceCollab();
   if (view.monacoEditor) {
     view.monacoEditor.getModel()?.dispose();
     view.monacoEditor.dispose();
@@ -203,7 +232,11 @@ export function renderCanvas() {
     mode: tab.doc.mode,
     ui: tab.session.ui,
   };
-  const canvasMode = ctx.getCanvasMode();
+  // Base mode drives the host surface (panel structure, panzoom vs centered column). The preview
+  // Toggle changes only what the iframe renders — resolveCanvasDocument reads the effective mode
+  // Via its own getCanvasMode. Flipping the toggle therefore re-renders panels in place (no
+  // ModeChanged teardown, no pan reset).
+  const { canvasMode } = S.ui;
 
   // Advance render generation so stale async renders from the previous cycle bail out
   view.renderGeneration += 1;
@@ -223,7 +256,7 @@ export function renderCanvas() {
 
   // Function editor mode: editing a function body in Monaco (JS)
   if (S.ui.editingFunction) {
-    renderFunctionEditor(ctx.closeFunctionEditor);
+    renderFunctionEditor();
     return;
   }
 
@@ -254,20 +287,31 @@ export function renderCanvas() {
     return;
   }
 
-  // Stylebook fast-path: re-apply styles without rebuilding DOM
+  // Stylebook fast-path: a style edit re-applies IN PLACE via the bridge (the iframe re-runs the
+  // Runtime's style applier on the specimen root — real @media, no re-render, no iframe reload).
+  // Filter/Customized changes fall through to the full rebuild (they change which specimens exist),
+  // As does a zero-host post (no stylebook iframe live yet).
   if (canvasMode === "stylebook" && !modeChanged) {
     const curFilter = tab.session.ui.stylebookFilter || "";
     const curCustomized = Boolean(tab.session.ui.stylebookCustomizedOnly);
     const filterChanged =
       curFilter !== _prevStylebookFilter || curCustomized !== _prevStylebookCustomizedOnly;
     if (!filterChanged) {
-      refreshStylebookStyles();
-      return;
+      const style = transposeStylebookStyle(getEffectiveStyle(tab.doc.document?.style));
+      if (postStyleUpdateToStylebookHosts(style as Record<string, unknown>) > 0) {
+        return;
+      }
     }
   }
 
   // Detect whether this is a mode transition or a content-only re-render
   view.prevCanvasMode = canvasMode;
+
+  // Best-effort commit of a live inline-edit session BEFORE lit rebuilds the panel DOM. Covers
+  // Keyboard-driven tab switches / mode changes where no parent pointerdown preceded the render —
+  // The endEdit posts ahead of the new render on the FIFO channel, so the resulting editCommit
+  // Still routes to the tab the session belonged to (the host's tabId flips only on renderComplete).
+  commitActiveEditSession();
 
   // DnD handlers are registered on inner canvas elements that get replaced on every
   // Content render, so always clean them up.
@@ -301,6 +345,7 @@ export function renderCanvas() {
     }
 
     // Dispose Monaco editor if switching away from source mode
+    disposeSourceCollab();
     if (view.monacoEditor) {
       view.monacoEditor.getModel()?.dispose();
       view.monacoEditor.dispose();
@@ -317,7 +362,7 @@ export function renderCanvas() {
     canvasWrap.style.overflow = "";
     canvasWrap.style.overflow = "";
 
-    // Clear zoom indicator (only re-rendered by design/preview/stylebook)
+    // Clear zoom indicator (only re-rendered by design/stylebook)
     resetZoomIndicator();
 
     // Dismiss open popovers/toolbars that are no longer relevant
@@ -334,9 +379,7 @@ export function renderCanvas() {
     renderStylebookMode({
       applyTransform,
       canvasPanelTemplate,
-      effectiveZoom,
       observeCenterUntilStable,
-      overlayBoxDescriptor,
       renderZoomIndicator,
       updateActivePanelHeaders,
     });
@@ -350,12 +393,6 @@ export function renderCanvas() {
     let editorContainer: HTMLDivElement | null = null;
     litRender(
       html`<div class="source-wrap">
-        <div class="source-toolbar">
-          <sp-action-button size="s" @click=${ctx.exportFile}>
-            <sp-icon-export slot="icon"></sp-icon-export>
-            Export
-          </sp-action-button>
-        </div>
         <div
           class="source-editor"
           ${ref((el) => {
@@ -372,20 +409,48 @@ export function renderCanvas() {
     const lang = sourceLang(tab);
     const modelUri = monaco.Uri.parse(`file:///${filePath}`);
     const model = monaco.editor.createModel("", lang, modelUri);
-    sourceContent(tab, lang)
-      .then((content) => {
-        const editor = view.monacoEditor;
-        if (editor && editor.getModel() === model) {
-          editor._ignoreNextChange = true;
-          model.setValue(content);
-        }
-      })
-      .catch(() => {
-        // Serialization unavailable — leave the buffer empty rather than crash the render
-      });
+    // Co-edited tabs bind the buffer to the shared Y.Text instead of a local serialization: the
+    // Canonical lock flips to "source", peers co-type character-level, and the source reconciler
+    // Parses back into the structure tree for everyone's canvas.
+    const collabCtx = collabSourceContext(tab);
+    if (collabCtx) {
+      void collabCtx
+        .enter()
+        .then(async () => {
+          const editor = view.monacoEditor;
+          if (!editor || editor.getModel() !== model) {
+            return;
+          }
+          const cleanup = await createSourceCollabBinding(model, editor, collabCtx);
+          // The editor may have been torn down while y-monaco loaded — unbind immediately.
+          if (view.monacoEditor !== editor || editor.getModel() !== model) {
+            cleanup();
+            return;
+          }
+          sourceCollabCleanup = cleanup;
+          if (collabCtx.readOnly) {
+            editor.updateOptions({ readOnly: true });
+          }
+        })
+        .catch(() => {
+          // Binding failures degrade to a read-only-ish local buffer; the session stays live.
+        });
+    } else {
+      sourceContent(tab, lang)
+        .then((content) => {
+          const editor = view.monacoEditor;
+          if (editor && editor.getModel() === model) {
+            editor._ignoreNextChange = true;
+            model.setValue(content);
+          }
+        })
+        .catch(() => {
+          // Serialization unavailable — leave the buffer empty rather than crash the render
+        });
+    }
     view.monacoEditor = monaco.editor.create(editorContainer as unknown as HTMLElement, {
       automaticLayout: true,
-      fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
+      fontFamily: "'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace",
       fontSize: 12,
       lineNumbers: "on",
       minimap: { enabled: false },
@@ -396,7 +461,11 @@ export function renderCanvas() {
       wordWrap: "on",
     });
 
-    // Debounced sync back to state
+    // Debounced sync back to state (solo tabs only: co-edited buffers flow through the shared
+    // Y.Text and the source reconciler's parse mirror instead of a whole-doc replace).
+    if (collabCtx) {
+      return;
+    }
     let debounce: ReturnType<typeof setTimeout> | undefined;
     view.monacoEditor.onDidChangeModelContent(() => {
       const editor = view.monacoEditor;
@@ -428,7 +497,7 @@ export function renderCanvas() {
           }
         } else if (lang === "json") {
           try {
-            tabNow.doc.document = JSON.parse(editor.getValue());
+            tabNow.doc.document = JSON.parse(editor.getValue()) as JxMutableNode;
             tabNow.doc.dirty = true;
           } catch {
             // Invalid JSON — don't update state
@@ -487,18 +556,17 @@ export function renderCanvas() {
       canvasWrap,
     );
 
-    canvasPanels.push(origPanel as unknown as CanvasPanel);
-    canvasPanels.push(currPanel as unknown as CanvasPanel);
+    canvasPanels.push(origPanel as unknown as CanvasPanel, currPanel as unknown as CanvasPanel);
 
     /** @param {string} content */
-    const parseContent = (content: string) => {
+    const parseContent = (content: string): Promise<JxMutableNode> => {
       const fmtPath = gitDiffState.filePath ?? "";
       if (formatForPath(fmtPath)) {
         return parseSourceForPath(fmtPath, content).then((r) => r.document);
       }
       return Promise.resolve().then(() => {
         try {
-          return JSON.parse(content);
+          return JSON.parse(content) as JxMutableNode;
         } catch {
           return {
             children: [{ tagName: "p", textContent: "Failed to parse" }],
@@ -509,20 +577,18 @@ export function renderCanvas() {
     };
 
     const { featureToggles } = S.ui;
-    Promise.all([
+    void Promise.all([
       parseContent(gitDiffState.originalContent || ""),
       parseContent(gitDiffState.currentContent || ""),
     ]).then(([originalDoc, currentDoc]) => {
       renderCanvasIntoPanel(
         origPanel as unknown as CanvasPanel,
-        new Set<string>(),
         featureToggles,
         originalDoc,
         gitDiffState,
       );
       renderCanvasIntoPanel(
         currPanel as unknown as CanvasPanel,
-        new Set<string>(),
         featureToggles,
         currentDoc,
         gitDiffState,
@@ -543,12 +609,17 @@ export function renderCanvas() {
       canvasWrap.style.padding = "0";
       canvasWrap.style.overflow = "hidden";
 
-      // Remove zoom indicator left over from design/preview mode
+      // Remove zoom indicator left over from design mode
       resetZoomIndicator();
     }
 
     const { baseWidth } = parseMediaEntries(getEffectiveMedia(S.document.$media));
     const { tpl: panelTpl, panel } = canvasPanelTemplate(null, null, true);
+    // A component-definition doc (root tag is a custom element) is a fragment, not a page: it should
+    // Hug its content rather than have the column fill+stretch to the viewport (dead scroll space).
+    const rootTag = (S.document as { tagName?: unknown }).tagName;
+    const isComponentDoc = typeof rootTag === "string" && rootTag.includes("-");
+    const columnClass = isComponentDoc ? "content-edit-column is-component" : "content-edit-column";
     const editTpl = html`
       <div
         class="content-edit-canvas"
@@ -556,16 +627,16 @@ export function renderCanvas() {
           panel.scrollContainer = (el as HTMLElement) || null;
         })}
       >
-        <div class="content-edit-column" style="max-width:${baseWidth}px">${panelTpl}</div>
+        <div class=${columnClass} style="max-width:${baseWidth}px">${panelTpl}</div>
       </div>
     `;
     litRender(editTpl, canvasWrap);
     canvasPanels.push(panel as unknown as CanvasPanel);
-    renderCanvasIntoPanel(panel as unknown as CanvasPanel, new Set<string>(), S.ui.featureToggles);
+    renderCanvasIntoPanel(panel as unknown as CanvasPanel, S.ui.featureToggles);
     return;
   }
 
-  // Normal canvas mode (design / preview) — set up panzoom surface
+  // Design mode (also hosts preview-toggle renders) — set up panzoom surface
   if (modeChanged) {
     canvasWrap.style.padding = "0";
     canvasWrap.style.overflow = "hidden";
@@ -608,7 +679,7 @@ export function renderCanvas() {
       canvasWrap,
     );
     canvasPanels.push(panel as unknown as CanvasPanel);
-    renderCanvasIntoPanel(panel as unknown as CanvasPanel, new Set<string>(), featureToggles);
+    renderCanvasIntoPanel(panel as unknown as CanvasPanel, featureToggles);
     applyTransform();
     if (modeChanged) {
       observeCenterUntilStable();
@@ -621,7 +692,6 @@ export function renderCanvas() {
   // Descending for max-width — matching the direction of the design's media queries).
   const allPanelDefs = [
     {
-      activeSet: activeBreakpointsForWidth(sizeBreakpoints, baseWidth),
       displayName: mediaDisplayName("--"),
       name: "base",
       width: baseWidth,
@@ -629,7 +699,6 @@ export function renderCanvas() {
   ];
   for (const bp of sizeBreakpoints) {
     allPanelDefs.push({
-      activeSet: activeBreakpointsForWidth(sizeBreakpoints, bp.width),
       displayName: mediaDisplayName(bp.name),
       name: bp.name,
       width: bp.width,
@@ -639,7 +708,7 @@ export function renderCanvas() {
   const panelEntries = allPanelDefs.map((def) => {
     const label = `${def.displayName} (${def.width}px)`;
     const { tpl, panel } = canvasPanelTemplate(def.name, label, false, def.width);
-    return { activeSet: def.activeSet, panel, tpl };
+    return { panel, tpl };
   });
 
   litRender(
@@ -660,13 +729,13 @@ export function renderCanvas() {
   );
 
   for (let i = 0; i < panelEntries.length; i++) {
-    const { panel, activeSet } = panelEntries[i];
+    const { panel } = panelEntries[i]!;
     const p = panel as CanvasPanel;
     canvasPanels.push(p);
     if (i === 0) {
-      renderCanvasIntoPanel(p, activeSet, featureToggles);
+      renderCanvasIntoPanel(p, featureToggles);
     } else {
-      setTimeout(() => renderCanvasIntoPanel(p, activeSet, featureToggles), 0);
+      setTimeout(() => renderCanvasIntoPanel(p, featureToggles), 0);
     }
   }
 
@@ -684,23 +753,24 @@ export function renderCanvas() {
 }
 
 /**
- * Render document into a single canvas panel. Tries runtime rendering first, falls back to
- * structural preview.
+ * Render a document into a single canvas panel via the iframe canvas: the document renders inside a
+ * same-runtime iframe served from the real origin (the iframe holds the render context, stamps
+ * `data-jx-path`/`data-jx-layout`, and draws its own overlays). Git-diff/preview overrides render
+ * but stay un-patchable (`ready` only flips for the real tab document).
  *
  * @param {CanvasPanel} panel
- * @param {Set<string>} activeBreakpoints
- * @param {Record<string, boolean>} featureToggles
+ * @param {Record<string, boolean>} _featureToggles - Accepted for call-site symmetry (the iframe
+ *   render needs no structural-preview fallback); unused.
  * @param {JxMutableNode | null} [docOverride] - Optional document to render (for diff mode). Uses
  *   active tab doc if not provided.
- * @param {GitDiffState | null} [gitDiffState] - Optional diff state. If provided, computes and
- *   applies diff highlighting.
+ * @param {GitDiffState | null} [_gitDiffState] - Accepted for call-site symmetry; the iframe path
+ *   does not apply parent-side diff highlighting.
  */
 function renderCanvasIntoPanel(
   panel: CanvasPanel,
-  activeBreakpoints: Set<string>,
-  featureToggles: Record<string, boolean>,
+  _featureToggles: Record<string, boolean>,
   docOverride: JxMutableNode | null = null,
-  gitDiffState: GitDiffState | null = null,
+  _gitDiffState: GitDiffState | null = null,
 ) {
   const gen = view.renderGeneration;
   const tab = activeTab.value;
@@ -709,179 +779,31 @@ function renderCanvasIntoPanel(
 
   canvasPerf.panelRenders += 1;
   panel.ready = false;
-  panel.liveCtx = null;
-  panel.activeBreakpoints = activeBreakpoints;
 
-  renderCanvasLive(gen, docToRender, canvas, panel)
-    .then((scope: Record<string, unknown> | null) => {
-      // Skip post-render setup if a newer render has started
-      if (gen !== view.renderGeneration) {
-        return;
-      }
-      if (scope) {
-        updateCanvas({ error: null, scope, status: "ready" });
-        applyCanvasMediaOverrides(canvas, activeBreakpoints);
-        statusMessage("Runtime render OK", 1500);
-        // Panel is patchable only when the live runtime path rendered the real document
+  // Overrides (git-diff docs) mount with a null tab identity: their iframes must never route doc
+  // Mutations anywhere. The real doc carries its tab id so edit/drop messages route to THAT tab.
+  void mountIframeCanvas(
+    gen,
+    docToRender,
+    canvas,
+    panel._width,
+    docOverride ? null : (tab?.id ?? null),
+  )
+    .then(() => {
+      if (gen === view.renderGeneration) {
+        // Mark the panel patchable once the real document is mounted (not a diff/preview override)
+        // So classifyOps admits surgical patches; the iframe holds the render context, so this
+        // Panel needs no parent-side render scope.
         panel.ready = !docOverride;
-        scheduleStyleTagSweep();
-
-        // Apply diff highlighting if in git-diff mode
-        if (gitDiffState && docOverride) {
-          // Determine which document is original and which is current
-          const isOriginal = docOverride === (gitDiffState.originalDoc || gitDiffState.original);
-          const _tab = activeTab.value;
-          const origDoc = isOriginal ? docOverride : gitDiffState.currentDoc || _tab?.doc.document;
-          const currDoc = isOriginal ? gitDiffState.currentDoc || _tab?.doc.document : docOverride;
-
-          const { byPath: diffMap } = computeDocumentDiff(origDoc, currDoc);
-
-          // Can't iterate WeakMap, so apply styling by walking the canvas
-          const { elToPath } = scope;
-          if (elToPath instanceof WeakMap) {
-            applyDiffHighlightToCanvas(canvas, diffMap);
-          }
-        }
-      } else {
-        // Fallback to structural preview
         updateCanvas({ error: null, scope: null, status: "ready" });
-        canvas.innerHTML = "";
-        renderCanvasNode(docToRender, [], canvas, activeBreakpoints, featureToggles);
-      }
-      try {
-        registerPanelDnD(panel as unknown as CanvasPanel);
-      } catch (dndError) {
-        console.warn("registerPanelDnD failed:", errorMessage(dndError));
-      }
-      registerPanelEvents(panel as unknown as CanvasPanel);
-      renderOverlays();
-      updateForcedPseudoPreview();
-
-      // Process pending inline edit when canvas becomes ready
-      const currentTab = activeTab.value;
-      if (currentTab?.session.ui?.pendingInlineEdit) {
-        const { path, mediaName: mn } = currentTab.session.ui.pendingInlineEdit as InlineEditDef;
-        currentTab.session.ui.pendingInlineEdit = null;
-        const targetPanel = canvasPanels.find((p) => p.mediaName === mn) || canvasPanels[0];
-        if (targetPanel) {
-          const el = findCanvasElement(path, targetPanel.canvas);
-          if (el) {
-            enterComponentInlineEdit(el, path);
-          }
-        }
+        statusMessage("Iframe render OK", 1500);
       }
     })
     .catch((error: unknown) => {
-      if (gen !== view.renderGeneration) {
-        return;
-      }
-      console.warn("renderCanvasLive rejected:", error instanceof Error ? error.message : error);
-      updateCanvas({ error: null, scope: null, status: "ready" });
-      canvas.innerHTML = "";
-      renderCanvasNode(docToRender, [], canvas, activeBreakpoints, featureToggles);
-      try {
-        registerPanelDnD(panel as unknown as CanvasPanel);
-      } catch (dndError) {
-        console.warn("registerPanelDnD failed:", errorMessage(dndError));
-      }
-      registerPanelEvents(panel as unknown as CanvasPanel);
-      renderOverlays();
-      updateForcedPseudoPreview();
+      console.warn("mountIframeCanvas failed:", error instanceof Error ? error.message : error);
     });
-}
-
-/**
- * Apply diff highlighting to canvas elements based on elToPath mapping. Walks the canvas DOM and
- * applies classes based on diff status.
- *
- * @param {HTMLElement} canvas
- * @param {Map<string, "added" | "removed" | "modified">} diffMap
- */
-function applyDiffHighlightToCanvas(
-  canvas: HTMLElement,
-  diffMap: Map<string, "added" | "removed" | "modified">,
-) {
-  if (!diffMap || diffMap.size === 0) {
-    return;
-  }
-
-  // Walk all elements in canvas and check their data attributes or other markers
-  const walkCanvas = (el: HTMLElement, /** @type {string} */ path = "") => {
-    const pathKey = path || "/";
-
-    if (diffMap.has(pathKey)) {
-      const status = diffMap.get(pathKey);
-      if (status === "added") {
-        el.classList.add("element-diff-added");
-      } else if (status === "removed") {
-        el.classList.add("element-diff-removed");
-      } else if (status === "modified") {
-        el.classList.add("element-diff-modified");
-      }
-    }
-
-    // Check for child elements (heuristic: children array markers)
-    let childIdx = 0;
-    for (const child of el.children) {
-      const childPath =
-        pathKey === "/" ? `children/${childIdx}` : `${pathKey}/children/${childIdx}`;
-      walkCanvas(child as HTMLElement, childPath);
-      childIdx += 1;
-    }
-  };
-
-  walkCanvas(canvas, "");
-}
-
-/**
- * Apply media query overrides as inline styles on matching canvas elements. Needed because the
- * runtime renders base styles as inline — @media CSS rules in the injected stylesheet can't win
- * against inline specificity.
- *
- * @param {Element} canvasEl
- * @param {Set<string>} activeBreakpoints
- */
-export function applyCanvasMediaOverrides(canvasEl: Element, activeBreakpoints: Set<string>) {
-  if (activeBreakpoints.size === 0) {
-    return;
-  }
-  const tab = activeTab.value;
-  if (!tab) {
-    return;
-  }
-  const docMedia = getEffectiveMedia(tab.doc.document.$media || {});
-  // Build a set of CSS condition texts that match active breakpoints
-  const activeConditions = new Set<string>();
-  for (const name of activeBreakpoints) {
-    if (docMedia[name]) {
-      activeConditions.add(docMedia[name]);
-    }
-  }
-  const overrides = collectMediaOverrides(document.styleSheets, activeConditions);
-  applyOverridesToCanvas(canvasEl, overrides);
 }
 
 export function renderOverlays() {
   overlaysPanel.render();
-}
-
-// ─── Style-tag hygiene ────────────────────────────────────────────────────────
-
-let _sweepTimer: ReturnType<typeof setTimeout> | undefined;
-
-/**
- * Remove scoped <style> tags whose owner elements are no longer in the document. The runtime emits
- * one tag per styled element (nested selectors / media rules) and full re-renders orphan the
- * previous tree's tags. Debounced so in-flight panel renders finish attaching first.
- */
-function scheduleStyleTagSweep() {
-  clearTimeout(_sweepTimer);
-  _sweepTimer = setTimeout(() => {
-    for (const tag of document.head.querySelectorAll("style[data-jx-owner]")) {
-      const uid = (tag as HTMLElement).dataset.jxOwner;
-      if (uid && !document.querySelector(`[data-jx="${uid}"]`)) {
-        tag.remove();
-      }
-    }
-  }, 250);
 }

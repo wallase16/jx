@@ -13,7 +13,15 @@
  * @module jx
  */
 
-import { computed, effect, isRef, onEffectCleanup, reactive, ref } from "@vue/reactivity";
+import {
+  computed,
+  effect,
+  effectScope,
+  isRef,
+  onEffectCleanup,
+  reactive,
+  ref,
+} from "@vue/reactivity";
 import { evaluateExpression, isMutating } from "./expression.ts";
 import type { DynamicClass, JxEventHandler, JxPath, JxRenderOptions, JxScope } from "./types.ts";
 import {
@@ -81,7 +89,7 @@ export async function Jx(
   const state = await buildScope(doc, {}, base);
   target.append(renderNode(doc, state, options));
   if (typeof state.onMount === "function") {
-    state.onMount(state);
+    (state.onMount as (s: JxScope) => unknown)(state);
   }
   return state;
 }
@@ -132,9 +140,123 @@ export function setSkipServerFunctions(v: boolean) {
   _serverFnConfig.skip = v;
 }
 
+// ─── Dev-proxy auth token (Studio cross-origin canvas) ────────────────────────
+// The Studio canvas iframe is served from a token-gated loopback origin (createProjectServer): its
+// POST /__jx_resolve__ + /__jx_server__ routes 403 without ?token=<rpcToken>. The iframe boot reads
+// The token from its URL and calls setResolveToken so these dev-proxy fetches authenticate. Unset by
+// Default, leaving production + same-origin dev untouched (bare path, no query appended).
+let _resolveToken: string | null = null;
+export function setResolveToken(token: string | null) {
+  _resolveToken = token || null;
+}
+/** Append the dev-proxy auth token to a privileged resolve path when one is configured. */
+function resolveProxyPath(path: string): string {
+  return _resolveToken ? `${path}?token=${encodeURIComponent(_resolveToken)}` : path;
+}
+
 /** @deprecated No longer needed — ContentCollection/ContentEntry resolve via generic class path */
 export function setSkipContentResolution(_v: boolean) {
   // No-op retained for API compatibility
+}
+
+/**
+ * Observe runtime-created reactive values: runs `fn` immediately inside a reactive effect and
+ * re-runs it whenever a tracked value changes; returns a disposer. Dep tracking in @vue/reactivity
+ * is per module INSTANCE, so an effect created from another copy of the package (e.g. the studio's
+ * own pin) can never track a ref/reactive created here — consumers that want to observe
+ * runtime-resolved scope values (the Studio canvas iframe's dataScope re-post) must use this.
+ *
+ * @param {() => void} fn - Read the reactive values to observe inside this callback.
+ * @returns {() => void} Disposer — stops the effect and its scope.
+ */
+export function observeScope(fn: () => void): () => void {
+  const scope = effectScope(true);
+  scope.run(() => {
+    effect(fn);
+  });
+  return () => scope.stop();
+}
+
+/**
+ * Run `fn` inside a detached reactive scope of THIS module's reactivity instance, returning its
+ * result plus a disposer that stops every effect `fn` created. Callers that render via
+ * {@link renderNode} and later tear the render down (the Studio canvas full render and its surgical
+ * subtree re-renders) MUST use this instead of their own effectScope: scope collection is per
+ * vue-reactivity module instance, so a scope from another copy of the package collects NOTHING and
+ * its stop() silently leaks every binding effect of the superseded render.
+ *
+ * @param {() => T} fn - Work that may create reactive effects (typically a renderNode call).
+ * @returns {{ result: T; stop: () => void }} The callback result and the scope disposer.
+ */
+export function runScoped<T>(fn: () => T): { result: T; stop: () => void } {
+  const scope = effectScope(true);
+  try {
+    const result = scope.run(fn) as T;
+    return { result, stop: () => scope.stop() };
+  } catch (error) {
+    // A throwing fn would otherwise leak the effects it created before failing.
+    scope.stop();
+    throw error;
+  }
+}
+
+/**
+ * Studio-canvas viewport-unit transpose. The canvas iframe is sized to its document's height, so
+ * any viewport unit (`vh`/`vw`/`vmin`/`vmax`/`svh`/…) — which resolves against the iframe ELEMENT —
+ * would feed back into an ever-growing height. When this is on, the runtime transposes them to
+ * CONTAINER units (`cqh`/`cqw`/…) that resolve against the canvas's fixed-size query container (see
+ * `canvas.html`): a predictable, feedback-free stand-in for the viewport. Off (the default) leaves
+ * CSS untouched for real production rendering.
+ */
+let _canvasViewportTranspose = false;
+export function setCanvasViewportTranspose(on: boolean) {
+  _canvasViewportTranspose = on;
+}
+
+const VIEWPORT_UNIT_RE = /(-?\d*\.?\d+)(?:s|l|d)?v(h|w|min|max|i|b)\b/gi;
+const VIEWPORT_UNIT_MAP: Record<string, string> = {
+  b: "cqb",
+  h: "cqh",
+  i: "cqi",
+  max: "cqmax",
+  min: "cqmin",
+  w: "cqw",
+};
+
+/**
+ * Transpose CSS viewport units → container-query units in a value string, but only when the
+ * studio-canvas flag is set (otherwise the value is returned untouched). `100vh` → `100cqh`,
+ * `50svw` → `50cqw`, `10vmin` → `10cqmin`, etc.
+ */
+export function transposeCanvasUnits(value: string): string {
+  if (!_canvasViewportTranspose || !value.includes("v")) {
+    return value;
+  }
+  return value.replace(
+    VIEWPORT_UNIT_RE,
+    (_m, num: string, dim: string) => `${num}${VIEWPORT_UNIT_MAP[dim.toLowerCase()] ?? `cq${dim}`}`,
+  );
+}
+
+/**
+ * Studio-canvas anchor de-linking. In the editor canvas a rendered `<a href>` would navigate the
+ * iframe when clicked, fighting element selection. When this is on, the runtime stamps the value on
+ * `data-jx-href` instead of `href` so the anchor is inert (selectable, not a live link) while the
+ * original target stays recoverable for richer link handling later. Off (the default) leaves
+ * production rendering untouched; the studio sets it for design/edit (not preview — see
+ * iframe-render).
+ */
+let _canvasDelinkAnchors = false;
+export function setCanvasDelinkAnchors(on: boolean) {
+  _canvasDelinkAnchors = on;
+}
+
+/** The attribute name to stamp `key` on `el` under — `href` → `data-jx-href` on de-linked anchors. */
+function canvasAttrName(el: HTMLElement, key: string): string {
+  if (_canvasDelinkAnchors && key === "href" && (el.tagName === "A" || el.tagName === "AREA")) {
+    return "data-jx-href";
+  }
+  return key;
 }
 
 /**
@@ -300,16 +422,31 @@ export { hasSchemaKeywords };
  * @param {JxScope} state
  * @returns {string}
  */
-function evaluateTemplate(str: string, state: JxScope) {
+function evaluateTemplate(str: string, state: JxScope): string {
   const $map = state?.$map as { item?: unknown; index?: number } | undefined;
-  const fn = new Function("state", "$map", "item", "index", `return \`${str}\``);
+  const fn = new Function("state", "$map", "item", "index", `return \`${str}\``) as (
+    state: JxScope,
+    $map: unknown,
+    item: unknown,
+    index: number | undefined,
+  ) => string;
   return fn(state, $map, $map?.item, $map?.index);
 }
 
 // ─── Step 2b: Function resolution (Shape 4) ─────────────────────────────────
 
+/** Shape of a dynamically imported module: named exports plus an optional default. */
+type ImportedModule = Record<string, unknown> & { default?: Record<string, unknown> };
+
+/** Minimal contract an externally-imported resolver class may implement. */
+interface ExternalClassInstance {
+  value?: unknown;
+  resolve?: () => unknown;
+  subscribe?: (cb: (newVal: unknown) => void) => void;
+}
+
 /** Module cache for $src imports (shared with external class resolution). */
-const _moduleCache = new Map();
+const _moduleCache = new Map<string, ImportedModule>();
 
 /**
  * Resolve a $prototype: "Function" entry into a function or computed.
@@ -337,11 +474,11 @@ async function resolveFunction(def: JxFunctionDef, state: JxScope, key: string, 
     return noop;
   }
 
-  let fn;
+  let fn: ((...args: unknown[]) => unknown) | undefined;
 
   if (def.body) {
     const params = resolveParamNames(def);
-    fn = new Function(...params, def.body);
+    fn = new Function(...params, def.body) as (...args: unknown[]) => unknown;
     Object.defineProperty(fn, "name", {
       configurable: true,
       value: def.name ?? key,
@@ -353,26 +490,27 @@ async function resolveFunction(def: JxFunctionDef, state: JxScope, key: string, 
       throw new Error(`Jx: '${key}' has neither body nor $src`);
     }
     const exportName = def.$export ?? key;
-    let mod;
+    let mod: ImportedModule;
     if (_moduleCache.has(src)) {
-      mod = _moduleCache.get(src);
+      mod = _moduleCache.get(src)!;
     } else {
       if (base) {
         const resolvedSrc = new URL(src, base).href;
         try {
-          mod = await import(resolvedSrc);
+          mod = (await import(resolvedSrc)) as ImportedModule;
         } catch {
-          mod = await import(src);
+          mod = (await import(src)) as ImportedModule;
         }
       } else {
-        mod = await import(src);
+        mod = (await import(src)) as ImportedModule;
       }
       _moduleCache.set(src, mod);
     }
-    fn = mod[exportName] ?? mod.default?.[exportName];
-    if (typeof fn !== "function") {
+    const candidate = mod[exportName] ?? mod.default?.[exportName];
+    if (typeof candidate !== "function") {
       throw new TypeError(`Jx: export "${exportName}" not found or not a function in "${src}"`);
     }
+    fn = candidate as (...args: unknown[]) => unknown;
   }
 
   // Detect computed: body contains a return statement, or $src function introspection.
@@ -475,11 +613,11 @@ export function renderNode(
   }
 
   // Extend scope with any $-prefixed local bindings declared on this node
-  let localState = state;
+  let localState: JxScope = state;
   for (const [key, val] of Object.entries(def)) {
     if (key.startsWith("$") && !RESERVED_KEYS.has(key)) {
       if (localState === state) {
-        localState = Object.create(state);
+        localState = Object.create(state) as JxScope;
       }
       localState[key] = isRefObj(val) ? resolveRef(val.$ref, state) : val;
     }
@@ -500,9 +638,6 @@ export function renderNode(
   if (def.$switch) {
     return renderSwitch(def, localState, options);
   }
-  if (isMappedArray(def.children)) {
-    return renderMappedArray(def, def.children, localState, options);
-  }
 
   const el = document.createElement(tagName);
 
@@ -519,10 +654,23 @@ export function renderNode(
   );
   applyAttributes(el, def.attributes ?? {}, localState);
 
-  const children = Array.isArray(def.children) ? def.children : [];
-  for (let i = 0; i < children.length; i++) {
-    const childOpts = options ? { ...options, _path: [...path, "children", i] } : undefined;
-    el.append(renderNode(children[i], localState, childOpts));
+  const kids = def.children;
+  if (isMappedArray(kids)) {
+    // Legacy whole-children repeater: the items render directly into `el` (which keeps its own
+    // TagName, e.g. <ul>), with no extra wrapper element.
+    const arrOpts = options ? { ...options, _path: [...path, "children"] } : undefined;
+    renderMappedArrayInto(el, kids, localState, arrOpts);
+  } else if (Array.isArray(kids)) {
+    for (let i = 0; i < kids.length; i++) {
+      const child = kids[i]!;
+      const childOpts = options ? { ...options, _path: [...path, "children", i] } : undefined;
+      if (isMappedArray(child)) {
+        // Array pseudo-element among siblings: expand inline, no wrapper.
+        renderMappedArrayInto(el, child, localState, childOpts);
+      } else {
+        el.append(renderNode(child, localState, childOpts));
+      }
+    }
   }
 
   return el;
@@ -562,14 +710,15 @@ function applyProperties(el: HTMLElement, def: JxElement, state: JxScope) {
         const handler = resolveRef(val.$ref, state);
         if (typeof handler === "function") {
           const scope = state;
-          el.addEventListener(key.slice(2), (e) => handler(scope, e));
+          const handlerFn = handler as (s: JxScope, e: Event) => unknown;
+          el.addEventListener(key.slice(2), (e) => handlerFn(scope, e));
         }
         continue;
       }
       // Event handler: inline $prototype: "Function"
       if (isFunctionDef(val) && val.body) {
         const params = resolveParamNames(val);
-        const fn = new Function(...params, val.body);
+        const fn = new Function(...params, val.body) as (s: JxScope, e: Event) => unknown;
         const scope = state;
         el.addEventListener(key.slice(2), (e) => fn(scope, e));
         continue;
@@ -676,19 +825,22 @@ export function applyStyle(
     if (prop.startsWith("--")) {
       if (isTemplateString(val)) {
         effect(() => {
-          el.style.setProperty(prop, evaluateTemplate(val, state));
+          el.style.setProperty(prop, transposeCanvasUnits(evaluateTemplate(val, state)));
         });
       } else {
-        el.style.setProperty(prop, scalar);
+        el.style.setProperty(prop, transposeCanvasUnits(scalar));
       }
     } else if (isTemplateString(val)) {
       effect(() => {
-        (el.style as unknown as Record<string, string>)[prop] = evaluateTemplate(val, state);
+        (el.style as unknown as Record<string, string>)[prop] = transposeCanvasUnits(
+          evaluateTemplate(val, state),
+        );
       });
     } else if (mediaOverriddenProps.has(prop)) {
+      // Goes through toCSSText (which transposes) — don't double-transpose here.
       baseDecls[prop] = scalar;
     } else {
-      (el.style as unknown as Record<string, string>)[prop] = scalar;
+      (el.style as unknown as Record<string, string>)[prop] = transposeCanvasUnits(scalar);
     }
   }
 
@@ -824,12 +976,13 @@ export function reapplyStyle(
  */
 function applyAttributes(el: HTMLElement, attrs: Record<string, JxAttributeValue>, state: JxScope) {
   for (const [k, v] of Object.entries(attrs)) {
+    const attr = canvasAttrName(el, k);
     if (isRefObj(v)) {
-      effect(() => el.setAttribute(k, String(resolveRef(v.$ref, state) ?? "")));
+      effect(() => el.setAttribute(attr, String(resolveRef(v.$ref, state) ?? "")));
     } else if (isTemplateString(v)) {
-      effect(() => el.setAttribute(k, String(evaluateTemplate(v, state))));
+      effect(() => el.setAttribute(attr, String(evaluateTemplate(v, state))));
     } else {
-      el.setAttribute(k, String(v));
+      el.setAttribute(attr, String(v));
     }
   }
 }
@@ -837,65 +990,72 @@ function applyAttributes(el: HTMLElement, attrs: Record<string, JxAttributeValue
 // ─── Array mapping ────────────────────────────────────────────────────────────
 
 /**
- * @param {JxElement} def
+ * Render a mapped array (repeater) wrapper-less: its item instances are inserted directly into
+ * `parentEl`, in place, ahead of an anchor comment that marks the array's position among the
+ * parent's other children. Re-renders reactively when `items` (or the filter/sort sources) change;
+ * each generation's item renders live in their own detached effect scope so nested arrays and
+ * template bindings are disposed — not leaked or double-fired — on the next change.
+ *
+ * `options._path` is the array node's own document path (`[…, "children", i]`, or `[…, "children"]`
+ * for a legacy whole-children repeater); item instances render at `[…that…, "map", index]`.
+ *
+ * @param {HTMLElement} parentEl
  * @param {import("@jxsuite/schema/types").JxMappedArray} arrayDef
  * @param {JxScope} state
  * @param {JxRenderOptions} [options]
- * @returns {HTMLElement}
  */
-function renderMappedArray(
-  def: JxElement,
+function renderMappedArrayInto(
+  parentEl: HTMLElement,
   arrayDef: JxMappedArray,
   state: JxScope,
   options?: JxRenderOptions,
 ) {
   const path = options?._path ?? [];
-  const container = document.createElement(def.tagName ?? "div");
-
-  if (options?.onNodeCreated) {
-    options.onNodeCreated(container, path, def, state);
-  }
-
-  applyProperties(container, def, state);
-  applyStyle(container, def.style ?? {}, (state["$media"] as Record<string, string>) ?? {}, state);
-  applyAttributes(container, def.attributes ?? {}, state);
+  const anchor = document.createComment("jx-array");
+  parentEl.append(anchor);
   const { items: itemsSrc, map: mapDef, filter: filterRef, sort: sortRef } = arrayDef;
 
   effect(() => {
-    container.innerHTML = "";
-    let items: unknown;
-    items = isRefObj(itemsSrc) ? resolveRef(itemsSrc.$ref, state) : itemsSrc;
-    if (!Array.isArray(items)) {
-      return;
-    }
-    if (isRefObj(filterRef)) {
+    let items: unknown = isRefObj(itemsSrc) ? resolveRef(itemsSrc.$ref, state) : itemsSrc;
+    if (Array.isArray(items) && isRefObj(filterRef)) {
       const fn = resolveRef(filterRef.$ref, state);
       if (typeof fn === "function") {
         items = items.filter(fn as (v: unknown) => boolean);
       }
     }
-    if (isRefObj(sortRef)) {
+    if (Array.isArray(items) && isRefObj(sortRef)) {
       const fn = resolveRef(sortRef.$ref, state);
       if (typeof fn === "function") {
         items = [...(items as unknown[])].toSorted(fn as (a: unknown, b: unknown) => number);
       }
     }
-
-    for (const [index, item] of (items as unknown[]).entries()) {
-      const child = Object.create(state);
-      child.$map = { index, item };
-      child["$map/item"] = item;
-      child["$map/index"] = index;
-      const childOpts = options
-        ? { ...options, _path: [...path, "children", "map", index] }
-        : undefined;
-      if (mapDef) {
-        container.append(renderNode(mapDef, child, childOpts));
-      }
+    if (!Array.isArray(items) || !mapDef) {
+      return;
     }
-  });
 
-  return container;
+    // Render this generation's items inside a detached scope; the cleanup (run before the next
+    // Re-render and when the enclosing render scope stops) tears it down and removes its nodes.
+    const scope = effectScope(true);
+    const nodes: ChildNode[] = [];
+    scope.run(() => {
+      for (const [index, item] of (items as unknown[]).entries()) {
+        const child = Object.create(state) as JxScope;
+        child.$map = { index, item };
+        child["$map/item"] = item;
+        child["$map/index"] = index;
+        const childOpts = options ? { ...options, _path: [...path, "map", index] } : undefined;
+        const node = renderNode(mapDef, child, childOpts);
+        anchor.before(node);
+        nodes.push(node);
+      }
+    });
+    onEffectCleanup(() => {
+      scope.stop();
+      for (const n of nodes) {
+        n.remove();
+      }
+    });
+  });
 }
 
 // ─── $switch ──────────────────────────────────────────────────────────────────
@@ -993,7 +1153,7 @@ export async function resolvePrototype(
 
       if (!def.manual) {
         effect(() => {
-          let url;
+          let url: string | undefined;
           if (isTemplateString(def.url)) {
             url = evaluateTemplate(def.url, state);
           } else {
@@ -1033,7 +1193,7 @@ export async function resolvePrototype(
           if (debounceMs > 0) {
             debounceTimer = setTimeout(doFetch, debounceMs);
           } else {
-            doFetch();
+            void doFetch();
           }
         });
       }
@@ -1046,11 +1206,13 @@ export async function resolvePrototype(
         const p: Record<string, string> = {};
         for (const [k, v] of Object.entries(def)) {
           if (k !== "$prototype") {
-            p[k] = isRefObj(v)
-              ? resolveRef(v.$ref, state)
-              : isTemplateString(v)
-                ? evaluateTemplate(v, state)
-                : v;
+            p[k] = (
+              isRefObj(v)
+                ? resolveRef(v.$ref, state)
+                : isTemplateString(v)
+                  ? evaluateTemplate(v, state)
+                  : v
+            ) as string;
           }
         }
         return new URLSearchParams(p).toString();
@@ -1061,10 +1223,10 @@ export async function resolvePrototype(
     case "SessionStorage": {
       const store = def.$prototype === "LocalStorage" ? localStorage : sessionStorage;
       const k = def.key ?? key;
-      let init;
+      let init: unknown;
       try {
         const s = store.getItem(k);
-        init = s !== null ? JSON.parse(s) : (def.default ?? null);
+        init = s !== null ? (JSON.parse(s) as unknown) : (def.default ?? null);
       } catch {
         init = def.default ?? null;
       }
@@ -1093,7 +1255,7 @@ export async function resolvePrototype(
           return null;
         }
         try {
-          return JSON.parse(decodeURIComponent(m[1]));
+          return JSON.parse(decodeURIComponent(m[1]!));
         } catch {
           return m[1];
         }
@@ -1254,16 +1416,16 @@ async function resolveExternalPrototype(
  * @returns {Promise<unknown>}
  */
 async function importAndInstantiate(def: JxScope, src: string, exportName: string, base?: string) {
-  let mod;
+  let mod: ImportedModule;
   if (_moduleCache.has(src)) {
-    mod = _moduleCache.get(src);
+    mod = _moduleCache.get(src)!;
   } else {
     try {
-      mod = await import(src);
+      mod = (await import(src)) as ImportedModule;
     } catch {
       if (base) {
         const resolvedSrc = new URL(src, base).href;
-        mod = await import(resolvedSrc);
+        mod = (await import(resolvedSrc)) as ImportedModule;
       } else {
         throw new Error(`Failed to import "${src}"`);
       }
@@ -1286,9 +1448,10 @@ async function importAndInstantiate(def: JxScope, src: string, exportName: strin
     }
   }
 
-  const instance = new ExportedClass(config);
+  const Ctor = ExportedClass as new (config: JxScope) => ExternalClassInstance;
+  const instance = new Ctor(config);
 
-  let value;
+  let value: unknown;
   if (typeof instance.resolve === "function") {
     value = await instance.resolve();
   } else if ("value" in instance) {
@@ -1375,9 +1538,9 @@ async function resolveClassJson(def: JxPrototypeDef, state: JxScope, key: string
       config[k] = v;
     }
   }
-  const instance = new DynClass(config);
+  const instance = new DynClass(config) as ExternalClassInstance;
 
-  let value;
+  let value: unknown;
   if (typeof instance.resolve === "function") {
     value = await instance.resolve();
   } else if ("value" in instance) {
@@ -1428,7 +1591,12 @@ function classFromSchema(classDef: JxClassDef) {
       }
       if (ctor?.body) {
         const bodyStr = Array.isArray(ctor.body) ? ctor.body.join("\n") : ctor.body;
-        new Function("config", bodyStr).call(this, config);
+        (
+          new Function("config", bodyStr) as (
+            this: unknown,
+            config: Record<string, unknown>,
+          ) => void
+        ).call(this, config);
       }
     }
   }
@@ -1499,7 +1667,7 @@ async function resolveViaDevProxy(def: JxPrototypeDef, state: JxScope, key: stri
 
   /** @param {JxScope} resolvedConfig */
   const doResolve = (resolvedConfig: JxScope) =>
-    fetch("/__jx_resolve__", {
+    fetch(resolveProxyPath("/__jx_resolve__"), {
       body: JSON.stringify({
         $base: base,
         $export: def.$export,
@@ -1561,17 +1729,17 @@ async function resolveServerFunction(
   const src = def.$src;
   const exportName = def.$export;
 
-  let mod;
+  let mod: ImportedModule;
   if (_moduleCache.has(src)) {
-    mod = _moduleCache.get(src);
+    mod = _moduleCache.get(src)!;
   } else {
     try {
-      mod = await import(src);
+      mod = (await import(src)) as ImportedModule;
     } catch {
       if (base) {
         try {
           const resolvedSrc = new URL(src, base).href;
-          mod = await import(resolvedSrc);
+          mod = (await import(resolvedSrc)) as ImportedModule;
         } catch {
           // Module cannot run in the browser — fall back to dev server proxy
           return resolveServerFunctionViaProxy(def, state, key, base);
@@ -1583,13 +1751,14 @@ async function resolveServerFunction(
     _moduleCache.set(src, mod);
   }
 
-  const fn = mod[exportName] ?? mod.default?.[exportName];
-  if (!fn) {
+  const candidate = mod[exportName] ?? mod.default?.[exportName];
+  if (!candidate) {
     throw new Error(`Jx: export "${exportName}" not found in "${src}" for "${key}"`);
   }
-  if (typeof fn !== "function") {
+  if (typeof candidate !== "function") {
     throw new TypeError(`Jx: "${exportName}" from "${src}" is not a function`);
   }
+  const fn = candidate as (args: JxScope) => Promise<unknown>;
 
   const rawArgs = def.arguments ?? {};
   const hasReactiveArg = Object.values(rawArgs).some((v: unknown) => isRefObj(v));
@@ -1649,7 +1818,7 @@ async function resolveServerFunctionViaProxy(
 
   /** @param {JxScope} args */
   const doResolve = (args: JxScope) =>
-    fetch("/__jx_server__", {
+    fetch(resolveProxyPath("/__jx_server__"), {
       body: JSON.stringify({
         $base: base,
         $export: def.$export,
@@ -1705,7 +1874,7 @@ export function resolveRef(refPath: string, state: JxScope) {
     const parts = refPath.split("/");
     const [, key] = parts; // "item" or "index"
     const map = state.$map as Record<string, unknown> | undefined;
-    const base = map?.[key] ?? state[`$map/${key}`];
+    const base = map?.[key!] ?? state[`$map/${key}`];
     return parts.length > 2 ? getPath(base, parts.slice(2).join("/")) : base;
   }
   if (refPath.startsWith("#/state/")) {
@@ -1775,7 +1944,7 @@ function getPath(obj: unknown, path: string) {
  * @returns {JxScope}
  */
 function mergeProps(def: JxElement, parentState: JxScope): JxScope {
-  const child = Object.create(parentState);
+  const child = Object.create(parentState) as JxScope;
   for (const [k, v] of Object.entries(def.$props ?? {})) {
     child[k] = isRefObj(v) ? resolveRef(v.$ref, parentState) : v;
   }
@@ -1801,14 +1970,29 @@ export function camelToKebab(s: string) {
 export function toCSSText(rules: Record<string, unknown> | object) {
   return Object.entries(rules)
     .filter(([k, v]) => !isNestedSelector(k) && (v === null || typeof v !== "object"))
-    .map(([p, v]) => `${camelToKebab(p)}: ${v}`)
+    .map(([p, v]) => `${camelToKebab(p)}: ${transposeCanvasUnits(String(v))}`)
     .join("; ");
 }
 
 // ─── Custom Element Registration ──────────────────────────────────────────────
 
-let _rootMedia = {};
+let _rootMedia: Record<string, string> = {};
 const _elementDefs = new Map();
+
+/**
+ * Seed the module-level root `$media` map used as the fallback for components that declare their
+ * own `@--name` style blocks but carry no own `$media` (buildScope ~279-280). `Jx()` sets this from
+ * the document during a full top-level render, but the Studio iframe canvas calls `buildScope`/
+ * `renderNode` directly (never `Jx()`), so without seeding it a component's `@--md` would resolve
+ * to the invalid `@media md`. Callers on the direct path MUST set it (with the merged `$media`)
+ * before `buildScope`, and re-set it every render so a stale map from a previous document cannot
+ * leak.
+ *
+ * @param {Record<string, string>} map
+ */
+export function setRootMedia(map: Record<string, string>): void {
+  _rootMedia = map ?? {};
+}
 
 /**
  * Resolve and register $elements entries (depth-first).
@@ -1949,6 +2133,13 @@ export async function defineElement(source: string | JxDocument, baseUrl?: strin
     }
 
     async connectedCallback() {
+      // An element carrying `data-jx-definition-root` IS the definition being rendered by an
+      // External renderer (the studio canvas editing this component's own document) — its subtree
+      // Is authored DOM, not an instantiation site. Self-initializing here would wipe that tree
+      // And re-render it with default state (the "component editor shows a live instance" bug).
+      if (this.dataset.jxDefinitionRoot !== undefined) {
+        return;
+      }
       if (this._jxInitialized) {
         return;
       }
@@ -1960,7 +2151,7 @@ export async function defineElement(source: string | JxDocument, baseUrl?: strin
       const propsAttr = this.dataset.jxProps;
       if (propsAttr) {
         try {
-          const props = JSON.parse(propsAttr);
+          const props = JSON.parse(propsAttr) as Record<string, unknown>;
           for (const [key, val] of Object.entries(props)) {
             if (key in (def.state ?? {})) {
               state[key] = val;
@@ -1968,6 +2159,21 @@ export async function defineElement(source: string | JxDocument, baseUrl?: strin
           }
         } catch {}
         delete this.dataset.jxProps;
+      }
+
+      // Read literal `props.*` attributes (JSON-authored instances pass props this way; the
+      // Compiler lifts them into $props at build, and this is the live-render mirror). String
+      // Values only — HTML lowercases attribute names, so state keys must be lowercase to match.
+      // Collect first: removing while iterating the live NamedNodeMap skips entries.
+      const propAttrNames = this.getAttributeNames().filter(
+        (name) => name.startsWith("props.") && name.length > "props.".length,
+      );
+      for (const name of propAttrNames) {
+        const key = name.slice("props.".length);
+        if (key in (def.state ?? {})) {
+          state[key] = this.getAttribute(name);
+          this.removeAttribute(name);
+        }
       }
 
       // Merge $props set as JS properties by parent before connection
@@ -2017,19 +2223,19 @@ export async function defineElement(source: string | JxDocument, baseUrl?: strin
       // Lifecycle: onMount
       const { onMount } = state;
       if (typeof onMount === "function") {
-        queueMicrotask(() => onMount(state));
+        queueMicrotask(() => (onMount as (s: JxScope) => unknown)(state));
       }
     }
 
     disconnectedCallback() {
       if (typeof this._state?.onUnmount === "function") {
-        this._state.onUnmount(this._state);
+        (this._state.onUnmount as (s: JxScope) => unknown)(this._state);
       }
     }
 
     adoptedCallback() {
       if (typeof this._state?.onAdopted === "function") {
-        this._state.onAdopted(this._state);
+        (this._state.onAdopted as (s: JxScope) => unknown)(this._state);
       }
     }
 
@@ -2100,7 +2306,7 @@ function renderCustomElementWithProps(
   const children = Array.isArray(def.children) ? def.children : [];
   for (let i = 0; i < children.length; i++) {
     const childOpts = options && path ? { ...options, _path: [...path, "children", i] } : undefined;
-    el.append(renderNode(children[i], state, childOpts));
+    el.append(renderNode(children[i]!, state, childOpts));
   }
 
   return el;

@@ -109,20 +109,12 @@
                 set -e
                 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
-                echo "Regenerating bun.nix..."
-                bun2nix
-
-                echo "Computing node_modules hash..."
-                # Build with fakeHash to get the real hash
-                sed -i 's|outputHash = "sha256-.*"|outputHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="|' packages/desktop/package.nix
-                hash=$(nix build .#packages.x86_64-linux.default 2>&1 | grep -oP 'got:\s+\Ksha256-[A-Za-z0-9+/=]+' || true)
-                if [ -n "$hash" ]; then
-                  sed -i "s|outputHash = \"sha256-.*\"|outputHash = \"$hash\"|" packages/desktop/package.nix
-                  echo "Updated hash: $hash"
-                else
-                  echo "ERROR: Could not determine hash. Check nix build output."
-                  exit 1
-                fi
+                # bun2nix derives every dependency hash from bun.lock, so the
+                # only thing to regenerate is bun.nix — there is no aggregate
+                # node_modules hash to chase with a fake-hash rebuild anymore.
+                echo "Regenerating bun.nix from bun.lock..."
+                bun2nix -o bun.nix
+                echo "Done — bun.nix is in sync with bun.lock."
               '')
             ];
 
@@ -143,6 +135,13 @@
             shellHook = ''
               export STATE_DIR="''${TMPDIR:-/tmp}/jx-state"
               export PATH="$PWD/node_modules/.bin:$PATH"
+
+              # Prebuilt native npm addons (e.g. sharp's @img/sharp-linux-x64)
+              # ship generic Linux binaries that dlopen() libstdc++.so.6 at
+              # runtime — NixOS has no FHS-standard location for it. Without
+              # this, sharp fails with ERR_DLOPEN_FAILED and image
+              # optimization breaks in `jx build`.
+              export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
 
               if [ -f "$PWD/.env" ]; then
                 set -a; source "$PWD/.env"; set +a

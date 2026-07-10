@@ -29,6 +29,8 @@ import {
   inferInputType,
   parseCemType,
 } from "../utils/studio-utils";
+import { classifyHref, composeHref } from "../utils/link-target";
+import type { LinkKind } from "../utils/link-target";
 import { collectCssParts, isCustomElementDoc } from "./signals-panel";
 import { mediaDisplayName } from "./shared";
 import { getCssInitialMap } from "./style-utils";
@@ -55,6 +57,7 @@ interface SignalOption {
 interface HtmlMetaEntry {
   $section: string;
   $order: number;
+  $attr?: string;
   $elements?: string[];
   $label?: string;
   $input?: string;
@@ -77,12 +80,9 @@ function isInsideMapTemplate(path: JxPath | null) {
   if (!path) {
     return false;
   }
-  for (let i = 0; i < path.length - 1; i++) {
-    if (path[i] === "children" && path[i + 1] === "map") {
-      return true;
-    }
-  }
-  return false;
+  // A "map" segment addresses a repeater template (`[…, "children", i, "map", …]`, or the legacy
+  // `[…, "children", "map", …]`), so anything at or below it is inside a map template.
+  return path.includes("map");
 }
 
 /**
@@ -173,9 +173,9 @@ function bindableFieldRow(
       const staticDefault = defaultAsString(defs[defName]);
       onChange(staticDefault || undefined);
     } else if (signalDefs.length > 0) {
-      onChange({ $ref: `#/state/${signalDefs[0][0]}` });
+      onChange({ $ref: `#/state/${signalDefs[0]![0]}` });
     } else if (extraSignals && extraSignals.length > 0) {
-      onChange({ $ref: extraSignals[0].value });
+      onChange({ $ref: extraSignals[0]!.value });
     }
   };
 
@@ -333,7 +333,7 @@ function renderSwitchFieldsTemplate(
       mapSignals,
     )}
     <div
-      style="font-size:11px;font-weight:600;color:var(--fg-dim);margin:8px 0 4px;text-transform:uppercase;letter-spacing:0.05em"
+      style="font-size:var(--spectrum-font-size-50, 11px);font-weight:600;color:var(--fg-dim);margin:8px 0 4px;text-transform:uppercase;letter-spacing:0.05em"
     >
       Cases
     </div>
@@ -371,7 +371,7 @@ function renderSwitchFieldsTemplate(
             >→</span
           >
           <span
-            style="cursor:pointer;color:var(--danger);font-size:11px"
+            style="cursor:pointer;color:var(--danger);font-size:var(--spectrum-font-size-50, 11px)"
             @click=${(e: Event) => {
               e.stopPropagation();
               transactDoc(activeTab.value!, (t) => mutateRemoveSwitchCase(t, path, caseName));
@@ -446,9 +446,9 @@ function renderComponentPropsFieldsTemplate(
             const staticDefault = defaultAsString(defs[defName]);
             onChange(staticDefault || undefined);
           } else if (signalDefs.length > 0) {
-            onChange({ $ref: `#/state/${signalDefs[0][0]}` });
+            onChange({ $ref: `#/state/${signalDefs[0]![0]}` });
           } else if (extraSignals && extraSignals.length > 0) {
-            onChange({ $ref: extraSignals[0].value });
+            onChange({ $ref: extraSignals[0]!.value });
           }
         };
 
@@ -565,7 +565,7 @@ function renderComponentPropsFieldsTemplate(
 
 /** Custom attrs fields template */
 function renderCustomAttrsFieldsTemplate(
-  node: JxMutableNode,
+  _node: JxMutableNode,
   path: JxPath,
   attrs: Record<string, unknown>,
   knownAttrNames: Set<string>,
@@ -659,7 +659,7 @@ function renderMediaFieldsTemplate(node: JxMutableNode) {
                   }}
                 />
                 <span
-                  style="font-size:10px;color:var(--fg-dim);font-family:'SF Mono','Fira Code',monospace;white-space:nowrap"
+                  style="font-size:10px;color:var(--fg-dim);font-family:var(--font-mono);white-space:nowrap"
                   >${view.addBreakpointPreview}</span
                 >
               </div>
@@ -716,7 +716,7 @@ function mediaBreakpointRowTemplate(name: string, query: string) {
         <input
           class="field-input"
           .value=${live(mediaDisplayName(name))}
-          style="flex:1;font-weight:600;font-size:12px"
+          style="flex:1;font-weight:600;font-size:var(--spectrum-font-size-75, 12px)"
           @input=${(e: Event) => {
             const newKey = friendlyNameToMedia((e.target as HTMLInputElement).value);
             currentRawLabel = newKey || "";
@@ -740,7 +740,7 @@ function mediaBreakpointRowTemplate(name: string, query: string) {
         />
         <span
           class="bp-raw-label"
-          style="font-size:10px;color:var(--fg-dim);font-family:'SF Mono','Fira Code',monospace;white-space:nowrap"
+          style="font-size:10px;color:var(--fg-dim);font-family:var(--font-mono);white-space:nowrap"
           >${name}</span
         >
         <span
@@ -802,6 +802,202 @@ function isPageDocument(documentPath: string | undefined | null) {
   return documentPath.startsWith("pages/") || documentPath.startsWith("./pages/");
 }
 
+// ─── Page-route enumeration (for the Link-target Internal picker) ─────────────
+
+/** @type {string[] | null} — cached list of internal routes derived from the pages/ tree. */
+let pageRouteEntries: string[] | null = null;
+
+/**
+ * Derive a site route from a page file path relative to `pages/`, following the file-based routing
+ * convention: `index.json` → the directory route, `[slug].json` → `:slug`, all others drop their
+ * extension. Directory routes get a trailing slash (`/about/`); the root is `/`.
+ *
+ * @param {string} relPath — path relative to `pages/`, forward-slashed (e.g. "blog/[slug].json").
+ * @returns {string}
+ */
+function routeForPagePath(relPath: string): string {
+  const withoutExt = relPath.replace(/\.[^./]+$/, "");
+  const segments = withoutExt
+    .split("/")
+    .map((seg) => (seg.startsWith("[") ? `:${seg.slice(1, -1)}` : seg));
+  const isIndex = segments.at(-1) === "index";
+  if (isIndex) {
+    segments.pop();
+  }
+  const body = segments.join("/");
+  if (!body) {
+    return "/";
+  }
+  // Dynamic routes keep no trailing slash; static routes are directory-style (trailing slash).
+  return isIndex || body.includes(":") ? `/${body}${isIndex ? "/" : ""}` : `/${body}/`;
+}
+
+/** Recursively walk the pages/ tree and populate {@link pageRouteEntries} with derived routes. */
+async function loadPageRouteEntries() {
+  const platform = getPlatform();
+  const routes: string[] = [];
+  const docExts = new Set([".json", ".md", ".html"]);
+  async function walk(dir: string, rel: string) {
+    let listing: DirEntry[];
+    try {
+      listing = await platform.listDirectory(dir);
+    } catch {
+      return;
+    }
+    for (const entry of listing) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.type === "directory") {
+        await walk(entry.path ?? `${dir}/${entry.name}`, childRel);
+      } else if (docExts.has(entry.name.slice(entry.name.lastIndexOf(".")))) {
+        routes.push(routeForPagePath(childRel));
+      }
+    }
+  }
+  await walk("pages", "");
+  pageRouteEntries = [...new Set(routes)].toSorted((a, b) => a.localeCompare(b));
+  renderOnly("rightPanel");
+}
+
+export function invalidatePageRouteCache() {
+  pageRouteEntries = null;
+}
+
+/**
+ * Composite Link-target control for an anchor's `href` — a kind selector (Internal / External /
+ * Anchor / Email / Phone) plus the matching input, backed by classifyHref/composeHref so edits
+ * round-trip. Internal targets render an sp-picker of page routes enumerated from the pages/ tree.
+ *
+ * @param {JxMutableNode} node
+ * @param {JxPath} path
+ */
+function renderLinkTargetField(node: JxMutableNode, path: JxPath) {
+  const raw = typeof node.attributes?.href === "string" ? node.attributes.href : "";
+  const { kind, value } = classifyHref(raw);
+
+  const commit = (nextKind: LinkKind, nextValue: string) => {
+    const composed = composeHref(nextKind, nextValue);
+    transactDoc(activeTab.value!, (t) =>
+      mutateUpdateAttribute(t, path, "href", composed || undefined),
+    );
+  };
+
+  const kindOptions: { value: LinkKind; label: string }[] = [
+    { label: "Internal Page", value: "internal" },
+    { label: "External URL", value: "external" },
+    { label: "Anchor", value: "anchor" },
+    { label: "Email", value: "mailto" },
+    { label: "Phone", value: "tel" },
+  ];
+
+  const kindSelector = html`
+    <sp-picker
+      class="link-target-kind"
+      size="s"
+      value=${kind}
+      @change=${(e: Event) => {
+        const nextKind = (e.target as HTMLInputElement).value as LinkKind;
+        // Switching kind reinterprets the current value under the new kind.
+        commit(nextKind, value);
+      }}
+    >
+      ${kindOptions.map((o) => html`<sp-menu-item value=${o.value}>${o.label}</sp-menu-item>`)}
+    </sp-picker>
+  `;
+
+  let valueInput;
+  if (kind === "internal") {
+    if (pageRouteEntries === null) {
+      void loadPageRouteEntries();
+    }
+    const routes = pageRouteEntries ?? [];
+    const knownValue = value !== "" && !routes.includes(value);
+    valueInput = html`
+      <sp-picker
+        class="link-target-value"
+        size="s"
+        value=${value}
+        @change=${(e: Event) => commit("internal", (e.target as HTMLInputElement).value)}
+      >
+        ${knownValue ? html`<sp-menu-item value=${value}>${value}</sp-menu-item>` : nothing}
+        ${routes.map((r) => html`<sp-menu-item value=${r}>${r}</sp-menu-item>`)}
+      </sp-picker>
+    `;
+  } else {
+    const placeholder =
+      kind === "mailto"
+        ? "name@example.com"
+        : kind === "tel"
+          ? "+15551234567"
+          : kind === "anchor"
+            ? "section-id"
+            : "https://example.com";
+    valueInput = html`
+      <sp-textfield
+        class="link-target-value"
+        size="s"
+        placeholder=${placeholder}
+        .value=${live(value)}
+        @input=${debouncedStyleCommit("link:href", 400, (e: Event) =>
+          commit(kind, (e.target as HTMLInputElement).value),
+        )}
+      ></sp-textfield>
+    `;
+  }
+
+  return renderFieldRow({
+    hasValue: raw !== "",
+    label: "Link",
+    onClear: () => transactDoc(activeTab.value, (t) => mutateUpdateAttribute(t, path, "href")),
+    prop: "href",
+    widget: html`<div class="link-target-field">${kindSelector}${valueInput}</div>`,
+  });
+}
+
+/**
+ * Real enum picker (sp-picker) for the anchor `target` attribute, replacing the generic
+ * jx-value-selector so the four browsing-context keywords are offered as a dropdown.
+ *
+ * @param {JxMutableNode} node
+ * @param {JxPath} path
+ * @param {HtmlMetaEntry} entry
+ */
+function renderTargetField(node: JxMutableNode, path: JxPath, entry: HtmlMetaEntry) {
+  const options = Array.isArray(entry.enum) ? (entry.enum as string[]) : [];
+  const current = typeof node.attributes?.target === "string" ? node.attributes.target : "";
+  return renderFieldRow({
+    hasValue: current !== "",
+    label: attrLabel(entry, "target"),
+    onClear: () => transactDoc(activeTab.value, (t) => mutateUpdateAttribute(t, path, "target")),
+    prop: "target",
+    widget: html`
+      <sp-picker
+        class="link-target-window"
+        size="s"
+        value=${current}
+        @change=${(e: Event) =>
+          transactDoc(activeTab.value!, (t) =>
+            mutateUpdateAttribute(
+              t,
+              path,
+              "target",
+              (e.target as HTMLInputElement).value || undefined,
+            ),
+          )}
+      >
+        ${options.map((o) => html`<sp-menu-item value=${o}>${o}</sp-menu-item>`)}
+      </sp-picker>
+    `,
+  });
+}
+
+/**
+ * True when an attribute value is a binding (a `$ref` object or a template string containing
+ * `${…}`), so the Link-target special-case must fall back to the raw widget to keep it editable.
+ */
+function isBoundAttrValue(value: unknown): boolean {
+  return isRef(value) || (typeof value === "string" && value.includes("${"));
+}
+
 function renderPageSection(node: JxMutableNode) {
   const tab = activeTab.value;
   if (!isPageDocument(tab!.documentPath)) {
@@ -809,7 +1005,7 @@ function renderPageSection(node: JxMutableNode) {
   }
 
   if (layoutEntries === null) {
-    loadLayoutEntries();
+    void loadLayoutEntries();
     return nothing;
   }
 
@@ -894,14 +1090,18 @@ function renderLayoutSelectionPanel(ctx: { navigateToComponent: (path: string) =
                 style="font-size:9px;padding:2px 6px;background:var(--spectrum-purple-600);color:white;border-radius:3px;text-transform:uppercase;letter-spacing:0.5px"
                 >Layout</span
               >
-              <code style="font-size:12px;font-family:monospace">&lt;${tagName}&gt;</code>
+              <code
+                style="font-size:var(--spectrum-font-size-75, 12px);font-family:var(--font-mono)"
+                >&lt;${tagName}&gt;</code
+              >
             </div>
             ${className
               ? html`<div class="style-row">
                   <div class="style-row-label">
                     <sp-field-label size="s">Class</sp-field-label>
                   </div>
-                  <span style="font-size:11px;color:var(--fg-dim);word-break:break-all"
+                  <span
+                    style="font-size:var(--spectrum-font-size-50, 11px);color:var(--fg-dim);word-break:break-all"
                     >${className}</span
                   >
                 </div>`
@@ -949,10 +1149,6 @@ export function renderPropertiesPanelTemplate(ctx: {
 
   const path = tab.session.selection;
   const isMapNode = node.$prototype === "Array";
-  const isMapParent =
-    node.children &&
-    typeof node.children === "object" &&
-    (node.children as unknown as { $prototype?: string }).$prototype === "Array";
   const isSwitchNode = Boolean(node.$switch);
   const isCustomInstance = (node.tagName || "").includes("-");
   const isRoot = path.length === 0;
@@ -969,6 +1165,18 @@ export function renderPropertiesPanelTemplate(ctx: {
   function renderAttrRow(attr: string, entry: HtmlMetaEntry, value: unknown) {
     const type = inferInputType(entry);
     const hasVal = value !== undefined && value !== "";
+
+    // Enhanced Link handling: only for anchors (a/area) with a plain (non-binding) value. Bindings
+    // ($ref objects or ${…} template strings) fall through to the raw widget to stay editable.
+    const isAnchor = tagName === "a" || tagName === "area";
+    if (isAnchor && !isBoundAttrValue(value)) {
+      if (attr === "href") {
+        return renderLinkTargetField(node, path);
+      }
+      if (attr === "target") {
+        return renderTargetField(node, path, entry);
+      }
+    }
 
     if (entry.type === "boolean") {
       return renderFieldRow({
@@ -1010,7 +1218,9 @@ export function renderPropertiesPanelTemplate(ctx: {
   const applicableAttrs = {} as Record<string, HtmlMetaEntry>;
   for (const [attr, entry] of Object.entries(htmlMeta.$defs) as [string, HtmlMetaEntry][]) {
     if (!entry.$elements || entry.$elements.includes(tagName)) {
-      applicableAttrs[attr] = entry;
+      // The $attr field aliases a $defs key to a different attribute name.
+      // This lets the same attribute (e.g. "name") carry per-element metadata.
+      applicableAttrs[entry.$attr ?? attr] = entry;
     }
   }
 
@@ -1025,7 +1235,7 @@ export function renderPropertiesPanelTemplate(ctx: {
     }
   }
   for (const sec of htmlMeta.$sections) {
-    attrSections[sec.key].sort(
+    attrSections[sec.key]!.sort(
       (a: { name: string; entry: HtmlMetaEntry }, b: { name: string; entry: HtmlMetaEntry }) =>
         a.entry.$order - b.entry.$order,
     );
@@ -1196,13 +1406,6 @@ export function renderPropertiesPanelTemplate(ctx: {
           >
           </sp-checkbox>
         </div>
-        ${isMapParent
-          ? html`
-              <div style="font-size:10px;color:var(--fg-dim);padding:4px 0;font-style:italic">
-                Children: Repeater (select in layers to configure)
-              </div>
-            `
-          : nothing}
       </div>
     </sp-accordion-item>
   `;
@@ -1245,9 +1448,9 @@ export function renderPropertiesPanelTemplate(ctx: {
                       const def = d as Record<string, unknown>;
                       return html`
                         <div
-                          style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:11px"
+                          style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:var(--spectrum-font-size-50, 11px)"
                         >
-                          <code style="font-family:monospace;color:var(--accent)"
+                          <code style="font-family:var(--font-mono);color:var(--accent)"
                             >${def.attribute}</code
                           >
                           <span style="color:var(--fg-dim)"> → </span>
@@ -1259,7 +1462,7 @@ export function renderPropertiesPanelTemplate(ctx: {
                             : nothing}
                           ${def.reflects
                             ? html`<span
-                                style="font-size:9px;background:var(--bg-hover);padding:1px 4px;border-radius:3px"
+                                style="font-size:9px;background:var(--hover-bg);padding:1px 4px;border-radius:var(--radius)"
                                 >reflects</span
                               >`
                             : nothing}
@@ -1283,9 +1486,9 @@ export function renderPropertiesPanelTemplate(ctx: {
     : nothing;
 
   const attrSectionTemplates = htmlMeta.$sections
-    .filter((sec) => attrSections[sec.key].length > 0)
+    .filter((sec) => attrSections[sec.key]!.length > 0)
     .map((sec) => {
-      const sectionAttrs = attrSections[sec.key];
+      const sectionAttrs = attrSections[sec.key]!;
       const hasAnySet = sectionAttrs.some(
         (a: { name: string; entry: HtmlMetaEntry }) => attrs[a.name] !== undefined,
       );
@@ -1355,9 +1558,9 @@ export function renderPropertiesPanelTemplate(ctx: {
                 ${cssProps.map(
                   ([prop, val]) => html`
                     <div
-                      style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:11px"
+                      style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:var(--spectrum-font-size-50, 11px)"
                     >
-                      <code style="font-family:monospace;color:var(--accent)">${prop}</code>
+                      <code style="font-family:var(--font-mono);color:var(--accent)">${prop}</code>
                       <span style="margin-left:auto;color:var(--fg-dim)">${String(val)}</span>
                     </div>
                   `,
@@ -1385,9 +1588,11 @@ export function renderPropertiesPanelTemplate(ctx: {
                 ${parts.map(
                   (p) => html`
                     <div
-                      style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:11px"
+                      style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:var(--spectrum-font-size-50, 11px)"
                     >
-                      <code style="font-family:monospace;color:var(--accent)">${p.name}</code>
+                      <code style="font-family:var(--font-mono);color:var(--accent)"
+                        >${p.name}</code
+                      >
                       <span style="color:var(--fg-dim)">&lt;${p.tag}&gt;</span>
                     </div>
                   `,

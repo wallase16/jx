@@ -1,3 +1,4 @@
+// oxlint-disable typescript/await-thenable -- bun test .resolves/.rejects matchers are typed `void` but return real Promises at runtime; the await is required.
 import { afterAll, describe, expect, test } from "bun:test";
 
 // Covers the parts of src/chromium/platform.ts not exercised by
@@ -19,6 +20,7 @@ const responses: Record<string, unknown> = {
   gitShow: "old file content",
   listFormats: [{ extensions: [".md"], format: "markdown" }],
   listPackages: [{ name: "left-pad", version: "^1.0.0" }],
+  listStarters: [{ id: "restaurant", name: "Bistro & Café", tagline: "A menu-driven site." }],
   removePackage: { removed: "left-pad" },
   searchFiles: [{ name: "found.json", path: "a/found.json", type: "file" }],
 };
@@ -105,7 +107,7 @@ const platform = createDesktopPlatform();
 
 afterAll(() => {
   globalThis.fetch = realFetch;
-  server.stop();
+  void server.stop();
 });
 
 function lastRequest(): ReceivedMessage | undefined {
@@ -206,6 +208,12 @@ describe("chromium platform: search, formats and packages", () => {
     });
   });
 
+  test("listStarters returns the starter template list", async () => {
+    const starters = await platform.listStarters!();
+    expect(starters).toEqual(responses.listStarters as never);
+    expect(lastRequest().method).toBe("listStarters");
+  });
+
   test("rejects when the server reports an unknown method", async () => {
     await expect(platform.gitStatus()).rejects.toThrow("Unknown method: gitStatus");
   });
@@ -214,52 +222,7 @@ describe("chromium platform: search, formats and packages", () => {
 // ─── AI assistant helpers (HTTP, not WebSocket) ─────────────────────────────
 
 describe("chromium platform: AI assistant endpoints", () => {
-  test("aiAuthStatus fetches auth status", async () => {
-    const status = await platform.aiAuthStatus();
-    expect(status).toEqual({ authenticated: true });
-    expect(fetchCalls.at(-1)?.url).toBe("/studio/ai/auth-status");
-  });
-
-  test("aiCreateSession posts message and returns session id", async () => {
-    const session = await platform.aiCreateSession({
-      message: "hello",
-      systemPrompt: "be brief",
-    });
-    expect(session).toEqual({ id: "sess-1" });
-    const call = fetchCalls.at(-1)!;
-    expect(call.url).toBe("/studio/ai/session");
-    expect(call.init?.method).toBe("POST");
-    expect(JSON.parse(call.init?.body as string)).toEqual({
-      message: "hello",
-      systemPrompt: "be brief",
-    });
-    const headers = (call.init?.headers ?? {}) as Record<string, string>;
-    expect(headers["Content-Type"]).toBe("application/json");
-  });
-
-  test("aiSendMessage posts to the session message endpoint", async () => {
-    await platform.aiSendMessage("sess-1", "follow-up");
-    const call = fetchCalls.at(-1)!;
-    expect(call.url).toBe("/studio/ai/session/sess-1/message");
-    expect(call.init?.method).toBe("POST");
-    expect(JSON.parse(call.init?.body as string)).toEqual({ message: "follow-up" });
-  });
-
-  test("aiStreamUrl builds the SSE stream URL", () => {
-    expect(platform.aiStreamUrl("sess-1")).toBe("/studio/ai/session/sess-1/stream");
-  });
-
-  test("aiStopSession posts to the stop endpoint", async () => {
-    await platform.aiStopSession("sess-1");
-    const call = fetchCalls.at(-1)!;
-    expect(call.url).toBe("/studio/ai/session/sess-1/stop");
-    expect(call.init?.method).toBe("POST");
-  });
-
-  test("aiDeleteSession issues a DELETE", async () => {
-    await platform.aiDeleteSession("sess-1");
-    const call = fetchCalls.at(-1)!;
-    expect(call.url).toBe("/studio/ai/session/sess-1");
-    expect(call.init?.method).toBe("DELETE");
+  test("aiChatUrl points at the chromium AI chat route", () => {
+    expect(platform.aiChatUrl()).toBe("/__studio__/ai/chat");
   });
 });

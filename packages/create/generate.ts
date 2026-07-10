@@ -1,21 +1,65 @@
 /** Shared project generation logic. Used by both the CLI scaffolder and the Studio server endpoint. */
 
-import { cp, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { adapterNeedsWrangler, buildWranglerJsonc } from "./scaffold";
+import { basename, join, relative, sep } from "node:path";
+
+import { Buffer } from "node:buffer";
 
 import { existsSync } from "node:fs";
+import { mediaForTemplate } from "./templates";
+import type { TemplateId } from "./templates";
 
 const __dirname = import.meta.dirname;
 const TEMPLATE_DIR = join(__dirname, "template");
+const TEMPLATE_OVERLAYS_DIR = join(__dirname, "templates");
+
+export interface DesignOptions {
+  /** Accent / primary brand color (hex). */
+  accent?: string;
+  /** Page background color (hex). */
+  background?: string;
+  /** Body text color (hex). */
+  text?: string;
+  /** Body font stack. */
+  bodyFont?: string;
+  /** Heading font stack. */
+  headingFont?: string;
+  /** Replaces project.json $media entirely when provided (name → query/width map). */
+  media?: Record<string, string>;
+  /** Logo image written to public/<name>. base64 is the raw file content, no data: prefix. */
+  logo?: { name: string; base64: string };
+}
 
 export interface ProjectOptions {
   name: string;
   description?: string;
   url?: string;
   adapter?: "static" | "cloudflare-pages" | "cloudflare-workers" | "node" | "bun";
+  /**
+   * Id of a starter template to clone (from @jxsuite/starters), or "blank"/undefined for the
+   * built-in minimal template.
+   */
+  starter?: string;
+  /**
+   * Id of a built-in template variant (from ./templates). Ignored when a non-blank starter is
+   * given; undefined means "blank".
+   */
+  template?: TemplateId;
+  /** Design quickstart (colors, fonts, logo, breakpoints) applied on top of the scaffold. */
+  design?: DesignOptions;
 }
 
-const CF_ADAPTERS = new Set(["cloudflare-pages", "cloudflare-workers"]);
+// Paths never copied out of a starter tree into a fresh project: build artifacts and the
+// Authoring-only Pexels fetch manifest.
+const STARTER_EXCLUDE = new Set([
+  "node_modules",
+  "dist",
+  ".cache",
+  ".jx-cache",
+  ".git",
+  "images.json",
+]);
 
 /**
  * Generate a new Jx project at the given path.
@@ -24,7 +68,15 @@ const CF_ADAPTERS = new Set(["cloudflare-pages", "cloudflare-workers"]);
  * @param {ProjectOptions} opts
  */
 export async function generateProject(destPath: string, opts: ProjectOptions) {
-  const { name, description = "", url = "", adapter = "static" } = opts;
+  const {
+    name,
+    description = "",
+    url = "",
+    adapter = "static",
+    starter,
+    template = "blank",
+    design,
+  } = opts;
 
   if (existsSync(destPath)) {
     const { readdirSync } = await import("node:fs");
@@ -34,11 +86,26 @@ export async function generateProject(destPath: string, opts: ProjectOptions) {
   }
 
   await mkdir(destPath, { recursive: true });
+
+  if (starter && starter !== "blank") {
+    await scaffoldFromStarter(destPath, starter, {
+      adapter,
+      description,
+      name,
+      url,
+      ...(design !== undefined ? { design } : {}),
+    });
+    return;
+  }
+
   await mkdir(join(destPath, "components"), { recursive: true });
   await mkdir(join(destPath, "public"), { recursive: true });
   await mkdir(join(destPath, "content"), { recursive: true });
 
-  const projectJson = buildProjectJson({ adapter, description, name, url });
+  const projectJson = buildProjectJson({ adapter, description, name, template, url });
+  if (design) {
+    applyDesign(projectJson as unknown as Record<string, unknown>, design, { starter: false });
+  }
   const packageJson = buildPackageJson({ adapter, description, name });
 
   const writes = [
@@ -49,12 +116,193 @@ export async function generateProject(destPath: string, opts: ProjectOptions) {
     cp(join(TEMPLATE_DIR, "pages"), join(destPath, "pages"), { recursive: true }),
   ];
 
-  if (adapter && CF_ADAPTERS.has(adapter)) {
+  if (adapterNeedsWrangler(adapter)) {
     const wranglerJsonc = buildWranglerJsonc({ adapter, slug: packageJson.name });
     writes.push(writeFile(join(destPath, "wrangler.jsonc"), wranglerJsonc));
   }
 
   await Promise.all(writes);
+
+  // The mobile-app variant overlays the shared skeleton with its app-shell layout and home page.
+  // Sequenced after the base copies so the overlay files win.
+  if (template === "mobile-app") {
+    await cp(join(TEMPLATE_OVERLAYS_DIR, "mobile-app"), destPath, {
+      force: true,
+      recursive: true,
+    });
+  }
+
+  if (design?.logo) {
+    await writeLogo(destPath, design.logo);
+  }
+}
+
+/**
+ * Clone a starter template from @jxsuite/starters, then re-stamp the files that carry the new
+ * project's identity: project.json (name/url/description/adapter) and a freshly-built package.json
+ * (current dependency ranges, user's name). Content, components, layouts, and public assets are
+ * copied verbatim.
+ *
+ * @param {string} destPath
+ * @param {string} starter
+ * @param {Required<Pick<ProjectOptions, "name">> &
+ *   Pick<ProjectOptions, "description" | "url" | "adapter">} opts
+ */
+async function scaffoldFromStarter(
+  destPath: string,
+  starter: string,
+  opts: {
+    name: string;
+    description?: string;
+    url?: string;
+    adapter?: ProjectOptions["adapter"];
+    design?: DesignOptions;
+  },
+) {
+  const { name, description = "", url = "", adapter = "static", design } = opts;
+
+  // Resolved lazily so blank projects never load the (large) starters package.
+  const { getStarterDir } = await import("@jxsuite/starters");
+  const srcDir = getStarterDir(starter);
+
+  await cp(srcDir, destPath, {
+    recursive: true,
+    filter: (src) => {
+      const rel = relative(srcDir, src);
+      return rel === "" || !rel.split(sep).some((seg) => STARTER_EXCLUDE.has(seg));
+    },
+  });
+
+  // Re-stamp project.json with the new project's identity, keeping the starter's design tokens,
+  // Content types, image pipeline, and head.
+  const projectPath = join(destPath, "project.json");
+  const project = JSON.parse(await readFile(projectPath, "utf8")) as Record<string, unknown>;
+  project.name = name;
+  if (url) {
+    project.url = url;
+  }
+  applyDescription(project, description);
+  if (adapter && adapter !== "static") {
+    const build = (project.build as Record<string, unknown> | undefined) ?? {};
+    build.adapter = adapter;
+    project.build = build;
+  }
+  if (design) {
+    applyDesign(project, design, { starter: true });
+  }
+  await writeFile(projectPath, `${JSON.stringify(project, null, "\t")}\n`);
+
+  // Rebuild package.json so scaffolded projects get current dep ranges and scripts regardless of
+  // What the in-repo starter pinned.
+  const packageJson = buildPackageJson({ adapter, description, name });
+  await writeFile(join(destPath, "package.json"), `${JSON.stringify(packageJson, null, "  ")}\n`);
+
+  if (adapterNeedsWrangler(adapter)) {
+    const wranglerJsonc = buildWranglerJsonc({ adapter, slug: packageJson.name });
+    await writeFile(join(destPath, "wrangler.jsonc"), wranglerJsonc);
+  }
+
+  if (design?.logo) {
+    await writeLogo(destPath, design.logo);
+  }
+}
+
+/**
+ * Apply the design quickstart (colors, fonts, breakpoints) to a project.json object, in place.
+ *
+ * Blank projects own their style block, so values are written directly. Starters are re-themed
+ * best-effort against the conventions the in-repo starters share (`--color-primary`,
+ * `--color-text-primary`, `--font-body`, `--font-heading`, top-level `fontFamily` /
+ * `backgroundColor`): an override only lands on a token key the starter's style already declares
+ * (falling back to the plain CSS property where noted), and is otherwise skipped silently rather
+ * than fighting the starter's layered styles. `--color-primary-hover` is intentionally left alone.
+ *
+ * @param {Record<string, unknown>} project — parsed project.json, mutated in place
+ * @param {DesignOptions} design
+ * @param {{ starter: boolean }} mode — starter clone vs. blank/template scaffold
+ */
+function applyDesign(
+  project: Record<string, unknown>,
+  design: DesignOptions,
+  { starter }: { starter: boolean },
+) {
+  const { accent, background, text, bodyFont, headingFont, media } = design;
+  const style = project.style as Record<string, unknown> | undefined;
+
+  if (style) {
+    if (accent && (!starter || "--color-primary" in style)) {
+      style["--color-primary"] = accent;
+    }
+    if (text) {
+      if (!starter) {
+        style.color = text;
+      } else if ("--color-text-primary" in style) {
+        style["--color-text-primary"] = text;
+      } else if ("color" in style) {
+        style.color = text;
+      }
+    }
+    if (background && (!starter || "backgroundColor" in style)) {
+      style.backgroundColor = background;
+    }
+    if (bodyFont) {
+      if (!starter) {
+        style.fontFamily = bodyFont;
+      } else if ("--font-body" in style) {
+        style["--font-body"] = bodyFont;
+      } else if ("fontFamily" in style) {
+        style.fontFamily = bodyFont;
+      }
+    }
+    if (headingFont && (!starter || "--font-heading" in style)) {
+      style["--font-heading"] = headingFont;
+    }
+  }
+
+  if (media && Object.keys(media).length > 0) {
+    project.$media = media;
+  }
+}
+
+/** File types accepted for the quickstart logo. */
+const LOGO_EXTENSION = /\.(svg|png|jpe?g|webp|gif|ico)$/i;
+
+/**
+ * Write the design-quickstart logo into the project's public/ directory. The provided name is
+ * flattened to its basename (no path segments can escape public/) and must carry an image extension
+ * — this is the only guard between UI input and the filesystem.
+ *
+ * @param {string} destPath — absolute path to the project directory
+ * @param {{ name: string; base64: string }} logo
+ */
+async function writeLogo(destPath: string, logo: { name: string; base64: string }) {
+  const fileName = basename(logo.name);
+  if (!LOGO_EXTENSION.test(fileName)) {
+    throw new Error(
+      `Logo file type not allowed: "${logo.name}" (expected .svg, .png, .jpg, .jpeg, .webp, .gif, or .ico)`,
+    );
+  }
+  const publicDir = join(destPath, "public");
+  await mkdir(publicDir, { recursive: true });
+  await writeFile(join(publicDir, fileName), Buffer.from(logo.base64, "base64"));
+}
+
+/**
+ * Set the `<meta name="description">` content in a project's `$head` (or leave it untouched when
+ * the starter has no such tag or no description was supplied).
+ *
+ * @param {Record<string, unknown>} project
+ * @param {string} description
+ */
+function applyDescription(project: Record<string, unknown>, description: string) {
+  if (!description || !Array.isArray(project.$head)) {
+    return;
+  }
+  for (const tag of project.$head as { tagName?: string; attributes?: Record<string, unknown> }[]) {
+    if (tag.tagName === "meta" && tag.attributes?.name === "description") {
+      tag.attributes.content = description;
+    }
+  }
 }
 
 /**
@@ -62,37 +310,29 @@ export async function generateProject(destPath: string, opts: ProjectOptions) {
  *
  * @param {{ slug: string; adapter: string }} opts
  */
-function buildWranglerJsonc({ slug, adapter }: { slug: string; adapter: string }) {
-  const compatibilityDate = new Date().toISOString().slice(0, 10);
-
-  // Nodejs_compat: server functions routinely pull in Node-flavored npm packages
-  const config =
-    adapter === "cloudflare-workers"
-      ? {
-          assets: { binding: "ASSETS", directory: "./dist" },
-          compatibility_date: compatibilityDate,
-          compatibility_flags: ["nodejs_compat"],
-          main: "./dist/worker.js",
-          name: slug,
-        }
-      : {
-          compatibility_date: compatibilityDate,
-          compatibility_flags: ["nodejs_compat"],
-          name: slug,
-          pages_build_output_dir: "./dist",
-        };
-
-  return `${JSON.stringify(config, null, "\t")}\n`;
-}
 
 /** @param {ProjectOptions} opts */
-function buildProjectJson({ name, description, url, adapter }: ProjectOptions) {
+function buildProjectJson({ name, description, url, adapter, template = "blank" }: ProjectOptions) {
+  // Mobile-app shells draw under device notches/home bars; viewport-fit=cover makes the safe-area
+  // Insets used by the app-shell layout take effect.
+  const viewport =
+    template === "mobile-app"
+      ? "width=device-width, initial-scale=1, viewport-fit=cover"
+      : "width=device-width, initial-scale=1";
+
   const $head = [
     {
-      attributes: { content: "width=device-width, initial-scale=1", name: "viewport" },
+      attributes: { content: viewport, name: "viewport" },
       tagName: "meta",
     },
   ];
+
+  if (template === "mobile-app") {
+    $head.push({
+      attributes: { content: "#ffffff", name: "theme-color" },
+      tagName: "meta",
+    });
+  }
 
   if (description) {
     $head.push({
@@ -113,12 +353,7 @@ function buildProjectJson({ name, description, url, adapter }: ProjectOptions) {
 
   return {
     $head,
-    $media: {
-      "--": "1280px",
-      "--lg": "(max-width: 1024px)",
-      "--md": "(max-width: 768px)",
-      "--sm": "(max-width: 640px)",
-    },
+    $media: mediaForTemplate(template),
     build,
     defaults: {
       lang: "en",
@@ -167,7 +402,7 @@ function buildPackageJson({
     dependencies["hono"] = "^4";
   }
 
-  if (adapter && CF_ADAPTERS.has(adapter)) {
+  if (adapterNeedsWrangler(adapter)) {
     devDependencies["wrangler"] = "^4";
     scripts.deploy =
       adapter === "cloudflare-workers" ? "wrangler deploy" : "wrangler pages deploy dist";

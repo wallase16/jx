@@ -11,6 +11,7 @@ import { Theme } from "@spectrum-web-components/theme/src/Theme.js";
 import themeSpectrumCSS from "@spectrum-web-components/theme/src/theme.css.js";
 import themeDarkCSS from "@spectrum-web-components/theme/src/theme-dark.css.js";
 import scaleMediumCSS from "@spectrum-web-components/theme/src/scale-medium.css.js";
+import { jxTheme } from "./jx-theme";
 import { Tabs } from "@spectrum-web-components/tabs/src/Tabs.js";
 import { Tab } from "@spectrum-web-components/tabs/src/Tab.js";
 import { TabPanel } from "@spectrum-web-components/tabs/src/TabPanel.js";
@@ -48,6 +49,7 @@ import { Accordion } from "@spectrum-web-components/accordion/src/Accordion.js";
 import { AccordionItem } from "@spectrum-web-components/accordion/src/AccordionItem.js";
 import { ActionBar } from "@spectrum-web-components/action-bar/src/ActionBar.js";
 import { Toast } from "@spectrum-web-components/toast/src/Toast.js";
+import { ProgressCircle } from "@spectrum-web-components/progress-circle/src/ProgressCircle.js";
 import { Table } from "@spectrum-web-components/table/src/Table.js";
 import { TableHead } from "@spectrum-web-components/table/src/TableHead.js";
 import { TableHeadCell } from "@spectrum-web-components/table/src/TableHeadCell.js";
@@ -87,6 +89,7 @@ import { IconCode } from "@spectrum-web-components/icons-workflow/src/elements/I
 import { IconBrush } from "@spectrum-web-components/icons-workflow/src/elements/IconBrush.js";
 import { IconGears } from "@spectrum-web-components/icons-workflow/src/elements/IconGears.js";
 import { IconSettings } from "@spectrum-web-components/icons-workflow/src/elements/IconSettings.js";
+import { IconInfo } from "@spectrum-web-components/icons-workflow/src/elements/IconInfo.js";
 import { IconBack } from "@spectrum-web-components/icons-workflow/src/elements/IconBack.js";
 import { IconProperties } from "@spectrum-web-components/icons-workflow/src/elements/IconProperties.js";
 import { IconEvent } from "@spectrum-web-components/icons-workflow/src/elements/IconEvent.js";
@@ -124,6 +127,10 @@ import { IconVisibility } from "@spectrum-web-components/icons-workflow/src/elem
 import { IconVisibilityOff } from "@spectrum-web-components/icons-workflow/src/elements/IconVisibilityOff.js";
 import { IconArtboard } from "@spectrum-web-components/icons-workflow/src/elements/IconArtboard.js";
 import { IconChat } from "@spectrum-web-components/icons-workflow/src/elements/IconChat.js";
+import { IconSend } from "@spectrum-web-components/icons-workflow/src/elements/IconSend.js";
+import { IconStop } from "@spectrum-web-components/icons-workflow/src/elements/IconStop.js";
+import { IconHistory } from "@spectrum-web-components/icons-workflow/src/elements/IconHistory.js";
+import { IconAttach } from "@spectrum-web-components/icons-workflow/src/elements/IconAttach.js";
 import { IconViewList } from "@spectrum-web-components/icons-workflow/src/elements/IconViewList.js";
 import { IconRailRightClose } from "@spectrum-web-components/icons-workflow/src/elements/IconRailRightClose.js";
 import { IconRailRightOpen } from "@spectrum-web-components/icons-workflow/src/elements/IconRailRightOpen.js";
@@ -190,6 +197,7 @@ const components = [
   ["sp-accordion-item", AccordionItem],
   ["sp-action-bar", ActionBar],
   ["sp-toast", Toast],
+  ["sp-progress-circle", ProgressCircle],
   ["sp-table", Table],
   ["sp-table-head", TableHead],
   ["sp-table-head-cell", TableHeadCell],
@@ -227,6 +235,7 @@ const components = [
   ["sp-icon-brush", IconBrush],
   ["sp-icon-gears", IconGears],
   ["sp-icon-settings", IconSettings],
+  ["sp-icon-info", IconInfo],
   ["sp-icon-back", IconBack],
   ["sp-icon-properties", IconProperties],
   ["sp-icon-event", IconEvent],
@@ -267,6 +276,10 @@ const components = [
   ["sp-icon-visibility-off", IconVisibilityOff],
   ["sp-icon-artboard", IconArtboard],
   ["sp-icon-chat", IconChat],
+  ["sp-icon-send", IconSend],
+  ["sp-icon-stop", IconStop],
+  ["sp-icon-history", IconHistory],
+  ["sp-icon-attach", IconAttach],
   ["sp-icon-view-list", IconViewList],
   ["sp-icon-text-bold", IconTextBold],
   ["sp-icon-text-italic", IconTextItalic],
@@ -292,5 +305,9 @@ for (const [tag, ctor] of components as [string, CustomElementConstructor][]) {
 Theme.registerThemeFragment("spectrum", "system", themeSpectrumCSS);
 Theme.registerThemeFragment("dark", "color", themeDarkCSS);
 Theme.registerThemeFragment("medium", "scale", scaleMediumCSS);
+/* Jx brand overrides. The 'app' kind must be registered under the literal
+   name "app" and, registered last, is adopted after the fragments above so
+   its :host declarations win the cascade (see src/ui/jx-theme.ts). */
+Theme.registerThemeFragment("app", "app", jxTheme);
 
 export { components };

@@ -8,6 +8,28 @@
 import "./harness";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createDevServerPlatform } from "../src/platforms/devserver";
+import type { FsEvent } from "../src/types";
+
+/** Minimal EventSource stub: records the latest instance and lets tests emit named events. */
+class FakeEventSource {
+  static last: FakeEventSource | null = null;
+  closed = false;
+  url: string;
+  private listeners = new Map<string, (ev: MessageEvent) => void>();
+  constructor(url: string) {
+    this.url = url;
+    FakeEventSource.last = this;
+  }
+  addEventListener(type: string, fn: (ev: MessageEvent) => void): void {
+    this.listeners.set(type, fn);
+  }
+  emit(type: string, data: string): void {
+    this.listeners.get(type)?.({ data } as MessageEvent);
+  }
+  close(): void {
+    this.closed = true;
+  }
+}
 
 // ─── Fetch stub with route table ─────────────────────────────────────────────
 
@@ -143,28 +165,28 @@ describe("devserver platform basics", () => {
 
 describe("path prefix logic", () => {
   test("without a projectRoot, paths pass through unprefixed", async () => {
-    route("/__studio/files", () => json([{ kind: "file", name: "a.json", path: "src/a.json" }]));
+    route("/__studio/files", () => json([{ type: "file", name: "a.json", path: "src/a.json" }]));
     const p = createDevServerPlatform();
     const entries = await p.listDirectory("src");
     expect(callsTo("/__studio/files")[0]!.search.get("dir")).toBe("src");
-    expect(entries[0].path).toBe("src/a.json");
+    expect(entries[0]!.path).toBe("src/a.json");
   });
 
   test("with a projectRoot, '.' maps to the root and responses are stripped", async () => {
     route("/__studio/activate", () => json({ ok: true }));
     route("/__studio/files", () =>
       json([
-        { kind: "file", name: "index.json", path: "examples/site/index.json" },
-        { kind: "directory", name: "outside", path: "elsewhere/outside" },
+        { type: "file", name: "index.json", path: "examples/site/index.json" },
+        { type: "directory", name: "outside", path: "elsewhere/outside" },
       ]),
     );
     const p = createDevServerPlatform();
     p.projectRoot = "examples/site";
     const entries = await p.listDirectory(".");
     expect(callsTo("/__studio/files")[0]!.search.get("dir")).toBe("examples/site");
-    expect(entries[0].path).toBe("index.json");
+    expect(entries[0]!.path).toBe("index.json");
     // Paths outside the root are left untouched
-    expect(entries[1].path).toBe("elsewhere/outside");
+    expect(entries[1]!.path).toBe("elsewhere/outside");
   });
 
   test("relative paths are prefixed and backslashes normalized", async () => {
@@ -439,6 +461,59 @@ describe("file operations", () => {
     expect(p.renameFile("a.json", "b.json")).rejects.toThrow("Failed to rename: a.json → b.json");
   });
 
+  test("renameFile maps the refactor report back to project-relative paths", async () => {
+    route("/__studio/activate", () => json({ ok: true }));
+    route("/__studio/file/rename", () =>
+      json({
+        errors: [{ error: "x", path: "site/bad.json" }],
+        from: "site/a.json",
+        ok: true,
+        references: {
+          files: [{ count: 2, path: "site/pages/index.json" }],
+          filesChanged: 1,
+          refsUpdated: 2,
+        },
+        to: "site/b.json",
+      }),
+    );
+    const p = createDevServerPlatform();
+    p.projectRoot = "site";
+    const report = await p.renameFile("a.json", "b.json");
+    expect(report).toMatchObject({
+      errors: [{ path: "bad.json" }],
+      from: "a.json",
+      references: { files: [{ count: 2, path: "pages/index.json" }] },
+      to: "b.json",
+    });
+  });
+
+  test("subscribeFileEvents strips and filters fs events from the SSE stream", () => {
+    const original = (globalThis as { EventSource?: unknown }).EventSource;
+    (globalThis as { EventSource?: unknown }).EventSource = FakeEventSource;
+    try {
+      route("/__studio/activate", () => json({ ok: true }));
+      const p = createDevServerPlatform();
+      p.projectRoot = "site";
+      const received: FsEvent[] = [];
+      const stop = p.subscribeFileEvents?.((events) => received.push(...events)) ?? (() => {});
+      const es = FakeEventSource.last;
+      es?.emit(
+        "fs",
+        JSON.stringify({
+          events: [
+            { isDir: false, path: "site/pages/a.json", type: "add" },
+            { isDir: false, path: "other/x.json", type: "add" },
+          ],
+        }),
+      );
+      expect(received).toEqual([{ isDir: false, path: "pages/a.json", type: "add" }]);
+      stop();
+      expect(es?.closed).toBe(true);
+    } finally {
+      (globalThis as { EventSource?: unknown }).EventSource = original;
+    }
+  });
+
   test("createDirectory is a no-op that resolves without fetching", async () => {
     const p = createDevServerPlatform();
     await p.createDirectory("anything");
@@ -515,6 +590,50 @@ describe("packages", () => {
     route("/__studio/packages", () => json({}, 500));
     expect(await p.listPackages()).toEqual([]);
   });
+
+  test("installDependencies posts install, returning the result or a failure log", async () => {
+    route("/__studio/packages/install", () => json({ ok: true }), "POST");
+    const p = createDevServerPlatform();
+    expect(await p.installDependencies!()).toEqual({ ok: true });
+    route("/__studio/packages/install", () => textRes("install boom", 500), "POST");
+    expect(await p.installDependencies!()).toEqual({ log: "install boom", ok: false });
+  });
+
+  test("dependenciesNeedInstall reflects the needsInstall flag", async () => {
+    route("/__studio/packages/needs-install", () => json({ needsInstall: true }));
+    const p = createDevServerPlatform();
+    expect(await p.dependenciesNeedInstall!()).toBe(true);
+    route("/__studio/packages/needs-install", () => json({}, 500));
+    expect(await p.dependenciesNeedInstall!()).toBe(false);
+  });
+
+  test("outdatedPackages returns the list, or [] on failure", async () => {
+    route("/__studio/packages/outdated", () =>
+      json([{ current: "^1.0.0", latest: "2.0.0", name: "a" }]),
+    );
+    const p = createDevServerPlatform();
+    expect(await p.outdatedPackages!()).toEqual([
+      { current: "^1.0.0", latest: "2.0.0", name: "a" },
+    ]);
+    route("/__studio/packages/outdated", () => json({}, 500));
+    expect(await p.outdatedPackages!()).toEqual([]);
+  });
+
+  test("setPackageVersions posts the updates, returning the result or a failure log", async () => {
+    const updates = [{ dev: false, name: "a", version: "^2.0.0" }];
+    route(
+      "/__studio/packages/set-versions",
+      (c) => {
+        expect(c.body).toEqual({ updates });
+        return json({ ok: true });
+      },
+      "POST",
+    );
+    const p = createDevServerPlatform();
+    expect(await p.setPackageVersions!(updates)).toEqual({ ok: true });
+    route("/__studio/packages/set-versions", () => textRes("conflict", 500), "POST");
+    expect(await p.setPackageVersions!(updates)).toEqual({ log: "conflict", ok: false });
+  });
 });
 
 describe("codeService", () => {
@@ -585,25 +704,25 @@ describe("locateFile", () => {
 
 describe("searchFiles", () => {
   test("builds a glob from the query plus normalized extensions", async () => {
-    route("/__studio/files", () => json([{ kind: "file", name: "foo.md", path: "docs/foo.md" }]));
+    route("/__studio/files", () => json([{ type: "file", name: "foo.md", path: "docs/foo.md" }]));
     const p = createDevServerPlatform();
     const results = await p.searchFiles("foo", [".md", "csv"]);
     const call = callsTo("/__studio/files")[0]!;
     expect(call.search.get("glob")).toBe("**/*foo*.{json,md,csv}");
     expect(call.search.get("dir")).toBe(".");
-    expect(results).toEqual([{ kind: "file", name: "foo.md", path: "docs/foo.md" }]);
+    expect(results).toEqual([{ type: "file", name: "foo.md", path: "docs/foo.md" }]);
   });
 
   test("strips the project root from result paths", async () => {
     route("/__studio/activate", () => json({ ok: true }));
     route("/__studio/files", () =>
-      json([{ kind: "file", name: "page.json", path: "site/pages/page.json" }]),
+      json([{ type: "file", name: "page.json", path: "site/pages/page.json" }]),
     );
     const p = createDevServerPlatform();
     p.projectRoot = "site";
     const results = await p.searchFiles("page");
     expect(callsTo("/__studio/files")[0]!.search.get("dir")).toBe("site");
-    expect(results[0].path).toBe("pages/page.json");
+    expect(results[0]!.path).toBe("pages/page.json");
   });
 
   test("returns [] on failure", async () => {
@@ -668,6 +787,39 @@ describe("fetchPluginSchema", () => {
     });
     const p = createDevServerPlatform();
     expect(await p.fetchPluginSchema("./missing.js")).toBeNull();
+  });
+});
+
+// ─── Class resolution (dev-proxy) ────────────────────────────────────────────
+
+describe("resolveClass", () => {
+  test("POSTs the config to /__jx_resolve__ and returns the parsed result", async () => {
+    route(
+      "/__jx_resolve__",
+      (c) => {
+        expect(c.body).toEqual({
+          $prototype: "ContentCollection",
+          $src: "@jxsuite/parser/ContentCollection.class.json",
+          contentType: "product",
+        });
+        return json([{ data: { sku: "a" }, id: "A" }]);
+      },
+      "POST",
+    );
+    const p = createDevServerPlatform();
+    expect(
+      await p.resolveClass!({
+        $prototype: "ContentCollection",
+        $src: "@jxsuite/parser/ContentCollection.class.json",
+        contentType: "product",
+      }),
+    ).toEqual([{ data: { sku: "a" }, id: "A" }]);
+  });
+
+  test("throws on a non-OK response", async () => {
+    route("/__jx_resolve__", () => textRes("boom", 500), "POST");
+    const p = createDevServerPlatform();
+    expect(p.resolveClass!({ $src: "x" })).rejects.toThrow("Class resolution failed: 500");
   });
 });
 
@@ -829,49 +981,130 @@ describe("git write operations", () => {
 // ─── AI assistant ────────────────────────────────────────────────────────────
 
 describe("AI assistant", () => {
-  test("aiAuthStatus returns the parsed body", async () => {
-    route("/__studio/ai/auth-status", () => json({ authenticated: true }));
+  test("aiChatUrl points at the proxy chat endpoint synchronously", () => {
     const p = createDevServerPlatform();
-    expect(await p.aiAuthStatus()).toEqual({ authenticated: true });
-  });
-
-  test("aiCreateSession posts options and surfaces errors", async () => {
-    route("/__studio/ai/session", (c) => {
-      expect(c.body).toEqual({ message: "hi", systemPrompt: "be nice" });
-      return json({ id: "s1" });
-    });
-    const p = createDevServerPlatform();
-    expect(await p.aiCreateSession({ message: "hi", systemPrompt: "be nice" })).toEqual({
-      id: "s1",
-    });
-    route("/__studio/ai/session", () => json({ error: "not authenticated" }, 401));
-    expect(p.aiCreateSession({ message: "hi" })).rejects.toThrow("not authenticated");
-  });
-
-  test("aiSendMessage posts to the session endpoint and surfaces errors", async () => {
-    route("/__studio/ai/session/s1/message", (c) => {
-      expect(c.body).toEqual({ message: "next" });
-      return json({ accepted: true });
-    });
-    const p = createDevServerPlatform();
-    expect(await p.aiSendMessage("s1", "next")).toEqual({ accepted: true });
-    route("/__studio/ai/session/s1/message", () => json({ error: "session gone" }, 404));
-    expect(p.aiSendMessage("s1", "again")).rejects.toThrow("session gone");
-  });
-
-  test("aiStreamUrl builds the stream URL synchronously", () => {
-    const p = createDevServerPlatform();
-    expect(p.aiStreamUrl("abc")).toBe("/__studio/ai/session/abc/stream");
+    expect(p.aiChatUrl()).toBe("/__studio/ai/chat");
     expect(calls.length).toBe(0);
   });
+});
 
-  test("aiStopSession and aiDeleteSession hit their endpoints", async () => {
-    route("/__studio/ai/session/s2/stop", () => json({}), "POST");
-    route("/__studio/ai/session/s2", () => json({}), "DELETE");
+describe("listProjects", () => {
+  test("maps /__studio/sites entries to catalogue entries", async () => {
+    route("/__studio/sites", () =>
+      json([
+        { config: { name: "Named Site" }, path: "sites/named" },
+        { config: {}, path: "sites/anon" },
+      ]),
+    );
     const p = createDevServerPlatform();
-    await p.aiStopSession("s2");
-    await p.aiDeleteSession("s2");
-    expect(callsTo("/__studio/ai/session/s2/stop")[0]!.method).toBe("POST");
-    expect(callsTo("/__studio/ai/session/s2")[0]!.method).toBe("DELETE");
+    expect(await p.listProjects?.()).toEqual([
+      { name: "Named Site", root: "sites/named", description: "sites/named" },
+      { name: "anon", root: "sites/anon", description: "sites/anon" },
+    ]);
+  });
+
+  test("returns [] when the sites endpoint fails", async () => {
+    route("/__studio/sites", () => json({ error: "nope" }, 500));
+    const p = createDevServerPlatform();
+    expect(await p.listProjects?.()).toEqual([]);
+  });
+});
+
+describe("cloudflare publish surface", () => {
+  test("cfApi forwards through the proxy with the stored token and unwraps result", async () => {
+    localStorage.setItem("jx.cf.token", "cf_tok");
+    route("/__studio/cf/proxy", () =>
+      json({ success: true, result: [{ id: "acct", name: "Acme" }] }, 200),
+    );
+    const p = createDevServerPlatform();
+    const accounts = await p.cfApi?.("/accounts");
+    expect(accounts).toEqual([{ id: "acct", name: "Acme" }]);
+    const call = callsTo("/__studio/cf/proxy")[0]!;
+    expect((call.body as { path: string }).path).toBe("/accounts");
+    localStorage.removeItem("jx.cf.token");
+  });
+
+  test("cfApi throws without a token and surfaces Cloudflare errors", async () => {
+    localStorage.removeItem("jx.cf.token");
+    const p = createDevServerPlatform();
+    expect(p.cfApi?.("/accounts")).rejects.toThrow(/No Cloudflare API token/);
+
+    localStorage.setItem("jx.cf.token", "cf_tok");
+    route("/__studio/cf/proxy", () =>
+      json({ success: false, errors: [{ message: "denied" }] }, 403),
+    );
+    expect(p.cfApi?.("/accounts")).rejects.toThrow(/denied/);
+    localStorage.removeItem("jx.cf.token");
+  });
+
+  test("cfConnection is null without a token, verified with one", async () => {
+    localStorage.removeItem("jx.cf.token");
+    localStorage.removeItem("jx.cf.accountId");
+    const p = createDevServerPlatform();
+    expect(await p.cfConnection?.()).toBeNull();
+
+    localStorage.setItem("jx.cf.token", "cf_tok");
+    route("/__studio/cf/proxy", () =>
+      json({ success: true, result: [{ id: "acct1", name: "Acme" }] }, 200),
+    );
+    expect(await p.cfConnection?.()).toEqual({
+      connected: true,
+      accountId: "acct1",
+      accountName: "Acme",
+    });
+    expect(localStorage.getItem("jx.cf.accountId")).toBe("acct1");
+
+    route("/__studio/cf/proxy", () => json({ success: false, errors: [] }, 401));
+    expect(await p.cfConnection?.()).toEqual({ connected: false });
+    localStorage.removeItem("jx.cf.token");
+    localStorage.removeItem("jx.cf.accountId");
+  });
+});
+
+describe("collab capability", () => {
+  test("a server without the endpoint degrades to solo, probing once", async () => {
+    const platform = createDevServerPlatform();
+    expect(await platform.collab?.("pages/index.md")).toBeNull();
+    expect(await platform.collab?.("pages/index.md")).toBeNull();
+    expect(callsTo("/__studio/collab")).toHaveLength(1);
+  });
+
+  test("a capable server opens the multiplexed socket at /__studio/collab", async () => {
+    route("/__studio/collab", () => json({ collab: true, version: 1 }));
+    const seen: string[] = [];
+    class RecordingWebSocket {
+      binaryType = "";
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((ev: unknown) => void) | null = null;
+      sent = 0;
+      constructor(url: string) {
+        seen.push(url);
+      }
+      send(): void {
+        this.sent += 1;
+      }
+      close(): void {
+        this.sent = -1;
+      }
+    }
+    const realWs = (globalThis as Record<string, unknown>)["WebSocket"];
+    (globalThis as Record<string, unknown>)["WebSocket"] = RecordingWebSocket;
+    try {
+      const platform = createDevServerPlatform();
+      // The open never resolves (the socket never answers); only the URL contract is under test.
+      void platform.collab?.("pages/index.md");
+      const deadline = Date.now() + 3000;
+      while (seen.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, 10);
+        });
+      }
+      expect(seen).toEqual([`ws://${location.host}/__studio/collab`]);
+    } finally {
+      (globalThis as Record<string, unknown>)["WebSocket"] = realWs;
+    }
   });
 });

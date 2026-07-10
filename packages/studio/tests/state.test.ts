@@ -9,6 +9,7 @@ import {
   hoverNode,
   isAncestor,
   nodeLabel,
+  normalizeArrayChildren,
   parentElementPath,
   pathKey,
   pathsEqual,
@@ -47,7 +48,7 @@ describe("getNodeAtPath", () => {
   });
 
   test("resolves first child", () => {
-    expect(getNodeAtPath(doc, ["children", 0])).toBe(doc.children[0]);
+    expect(getNodeAtPath(doc, ["children", 0])).toBe(doc.children[0]!);
   });
 
   test("resolves deeply nested child", () => {
@@ -168,10 +169,10 @@ describe("flattenTree", () => {
     const doc = makeDoc();
     const rows = flattenTree(doc);
     expect(rows.length).toBe(5); // Root + h1 + section + p + span
-    expect(rows[0].nodeType).toBe("element");
-    expect(rows[0].depth).toBe(0);
-    expect((rows[1].node as JxMutableNode).tagName).toBe("h1");
-    expect(rows[1].depth).toBe(1);
+    expect(rows[0]!.nodeType).toBe("element");
+    expect(rows[0]!.depth).toBe(0);
+    expect((rows[1]!.node as JxMutableNode).tagName).toBe("h1");
+    expect(rows[1]!.depth).toBe(1);
   });
 
   test("flattens $map children", () => {
@@ -194,6 +195,30 @@ describe("flattenTree", () => {
     expect(templateRow).toBeDefined();
   });
 
+  test("flattens an array pseudo-element among sibling children", () => {
+    const doc = {
+      children: [
+        { tagName: "li", textContent: "header" },
+        {
+          $prototype: "Array",
+          items: { $ref: "#/state/rows" },
+          map: { tagName: "li", textContent: "item" },
+        },
+      ],
+      tagName: "ul",
+    };
+    const rows = flattenTree(doc as unknown as JxMutableNode);
+    const mapRow = rows.find((r) => r.nodeType === "map");
+    expect(mapRow).toBeDefined();
+    // The array node sits at its own child index, with the template one level under it.
+    expect(mapRow!.path).toEqual(["children", 1]);
+    expect(mapRow!.depth).toBe(1);
+    const templateRow = rows.find((r) => pathsEqual(r.path, ["children", 1, "map"]));
+    expect(templateRow).toBeDefined();
+    expect((templateRow!.node as JxMutableNode).tagName).toBe("li");
+    expect(templateRow!.depth).toBe(2);
+  });
+
   test("flattens $switch cases", () => {
     const doc = {
       $switch: "${route}",
@@ -206,7 +231,7 @@ describe("flattenTree", () => {
     const rows = flattenTree(doc);
     const caseRows = rows.filter((r) => r.nodeType === "case");
     expect(caseRows.length).toBe(2);
-    expect(caseRows[0].depth).toBe(1);
+    expect(caseRows[0]!.depth).toBe(1);
   });
 
   test("emits case-ref for $ref cases", () => {
@@ -241,15 +266,60 @@ describe("flattenTree", () => {
     const rows = flattenTree(doc);
     // Should have the root + the slotted p child
     expect(rows.length).toBe(2);
-    expect((rows[1].node as JxMutableNode).tagName).toBe("p");
-    expect(rows[1].path).toEqual(["children", 0]);
+    expect((rows[1]!.node as JxMutableNode).tagName).toBe("p");
+    expect(rows[1]!.path).toEqual(["children", 0]);
   });
 
   test("leaf node returns single row", () => {
     const doc = { tagName: "br" };
     const rows = flattenTree(doc);
     expect(rows.length).toBe(1);
-    expect(rows[0].path).toEqual([]);
+    expect(rows[0]!.path).toEqual([]);
+  });
+});
+
+// ─── normalizeArrayChildren ───────────────────────────────────────────────────
+
+describe("normalizeArrayChildren", () => {
+  test("converts a legacy whole-children repeater into a single array member", () => {
+    const doc: JxMutableNode = {
+      children: { $prototype: "Array", items: { $ref: "#/state/rows" }, map: { tagName: "li" } },
+      tagName: "ul",
+    };
+    normalizeArrayChildren(doc);
+    const kids = doc.children as JxMutableNode[];
+    expect(Array.isArray(kids)).toBe(true);
+    expect(kids.length).toBe(1);
+    expect(kids[0]!.$prototype).toBe("Array");
+  });
+
+  test("leaves an already-normalized member array untouched", () => {
+    const arr: JxMutableNode = { $prototype: "Array", items: [], map: { tagName: "li" } };
+    const doc: JxMutableNode = { children: [{ tagName: "li" }, arr], tagName: "ul" };
+    normalizeArrayChildren(doc);
+    const kids = doc.children as JxMutableNode[];
+    expect(kids).toHaveLength(2);
+    expect(kids[1]).toBe(arr);
+  });
+
+  test("recurses through repeater templates and $switch cases", () => {
+    const doc: JxMutableNode = {
+      children: {
+        $prototype: "Array",
+        items: [],
+        map: {
+          // Nested legacy whole-children repeater inside the template.
+          children: { $prototype: "Array", items: [], map: { tagName: "span" } },
+          tagName: "ul",
+        },
+      },
+      tagName: "div",
+    };
+    normalizeArrayChildren(doc);
+    const kids = doc.children as JxMutableNode[];
+    const [outer] = kids;
+    expect(Array.isArray(kids)).toBe(true);
+    expect(Array.isArray((outer!.map as JxMutableNode).children)).toBe(true);
   });
 });
 
@@ -288,6 +358,19 @@ describe("nodeLabel", () => {
 
   test("defaults to div when no tagName", () => {
     expect(nodeLabel({})).toBe("div");
+  });
+
+  test("named slot shows its name", () => {
+    expect(nodeLabel({ attributes: { name: "header" }, tagName: "slot" })).toBe("slot: header");
+  });
+
+  test("unnamed slot shows plain slot label", () => {
+    expect(nodeLabel({ tagName: "slot" })).toBe("slot");
+    expect(nodeLabel({ attributes: { name: "  " }, tagName: "slot" })).toBe("slot");
+  });
+
+  test("$id wins over slot label", () => {
+    expect(nodeLabel({ $id: "hero-slot", tagName: "slot" })).toBe("hero-slot");
   });
 });
 

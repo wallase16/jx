@@ -2,6 +2,7 @@
 import { toRaw } from "../reactivity";
 import { jsonClone } from "../utils/studio-utils";
 import { childIndex, getNodeAtPath, isAncestor, parentElementPath, pathsEqual } from "../state";
+import { applyDocOpToDoc, childArray, cloneValue } from "./doc-op-apply";
 import {
   beginRecording,
   endRecording,
@@ -31,11 +32,6 @@ function patchHistoryEnabled() {
   } catch {
     return true;
   }
-}
-
-/** Deep-clone a recorded value (undefined passes through; reactive proxies are read through). */
-function cloneValue<T>(v: T): T {
-  return v === undefined || v === null ? v : (jsonClone(v as object) as T);
 }
 
 /** Forward/inverse pair for a single-key change on the node at path. */
@@ -81,21 +77,46 @@ export type JxNodeValue =
   | JxEventBinding
   | undefined;
 
+// ─── Transactional layer ─────────────────────────────────────────────────────
+
 /**
- * The editable children array of a node, created when absent. Mapped-array children (`$prototype:
- * "Array"`) cannot be index-mutated — fail loudly instead of corrupting.
+ * Where a transaction came from: a direct user/tool edit, the undo/redo machinery replaying
+ * recorded ops, or a remote collaborator's ops applied locally. Observers use this to avoid
+ * republishing what they themselves applied.
  */
-function childArray(node: JxMutableNode): (JxMutableNode | string)[] {
-  if (!node.children) {
-    node.children = [];
-  }
-  if (!Array.isArray(node.children)) {
-    throw new TypeError("Cannot insert into mapped-array children; edit the map template instead");
-  }
-  return node.children;
+export type TransactOrigin = "user" | "history" | "remote";
+
+/**
+ * Module-level hook invoked at the end of every transactDoc (after the canvas patch apply and the
+ * dirty mark). Registered by the collab layer to mirror local edits into a shared document; at most
+ * one observer exists. `record.docOps` may be empty for un-instrumented mutations — observers must
+ * handle that (e.g. by diffing).
+ */
+export type TransactObserver = (
+  tab: Tab,
+  record: TransactionRecord,
+  origin: TransactOrigin,
+) => void;
+
+let _transactObserver: TransactObserver | null = null;
+
+export function setTransactObserver(fn: TransactObserver | null) {
+  _transactObserver = fn;
 }
 
-// ─── Transactional layer ─────────────────────────────────────────────────────
+/**
+ * Module-level gate consulted at transactDoc entry: return a refusal reason to block the mutation
+ * (the collab layer soft-freezes structural editing while a peer holds source-canonical), or null
+ * to proceed. Remote-origin transactions always pass — they ARE the frozen representation's
+ * mirror.
+ */
+export type TransactGate = (tab: Tab, origin: TransactOrigin) => string | null;
+
+let _transactGate: TransactGate | null = null;
+
+export function setTransactGate(fn: TransactGate | null) {
+  _transactGate = fn;
+}
 
 /**
  * Apply a document mutation transactionally: push to history and mark dirty. The mutationFn
@@ -103,14 +124,17 @@ function childArray(node: JxMutableNode): (JxMutableNode | string)[] {
  *
  * @param {Tab | null} tab
  * @param {(tab: Tab) => void} mutationFn
- * @param {{ skipHistory?: boolean }} [opts]
+ * @param {{ skipHistory?: boolean; origin?: TransactOrigin }} [opts]
  */
 export function transactDoc(
   tab: Tab | null,
   mutationFn: (tab: Tab) => void,
-  { skipHistory = false }: { skipHistory?: boolean } = {},
+  { skipHistory = false, origin = "user" }: { skipHistory?: boolean; origin?: TransactOrigin } = {},
 ) {
   if (!tab) {
+    return;
+  }
+  if (origin !== "remote" && _transactGate?.(tab, origin)) {
     return;
   }
   const selectionBefore = tab.session.selection ? [...tab.session.selection] : null;
@@ -146,7 +170,7 @@ export function transactDoc(
 
   if (verdict.patchable) {
     try {
-      consumer!.apply(tab, record.ops);
+      consumer!.apply(tab, record.ops, record);
     } catch (error) {
       consumer!.escalate(
         `patch-apply-failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -154,11 +178,13 @@ export function transactDoc(
     }
   }
 
-  if (!skipHistory) {
+  if (!skipHistory && !_batchTab) {
     pushHistoryEntry(tab, raw, record, selectionBefore);
   }
 
   tab.doc.dirty = true;
+
+  _transactObserver?.(tab, record, origin);
 }
 
 /**
@@ -190,8 +216,8 @@ function pushHistoryEntry(
   });
   if (truncated.length > HISTORY_LIMIT) {
     // The new base entry must be a self-contained checkpoint before the old base is dropped.
-    if (!truncated[1].document) {
-      truncated[1].document = materializeState(truncated, 1);
+    if (!truncated[1]!.document) {
+      truncated[1]!.document = materializeState(truncated, 1);
     }
     truncated.shift();
   }
@@ -213,15 +239,15 @@ function materializeState(
   target: number,
 ): JxMutableNode {
   let base = target;
-  while (base >= 0 && !snapshots[base].document) {
+  while (base >= 0 && !snapshots[base]!.document) {
     base -= 1;
   }
   if (base < 0) {
     throw new Error("history-missing-checkpoint");
   }
-  const doc = jsonClone(snapshots[base].document) as JxMutableNode;
+  const doc = jsonClone(snapshots[base]!.document) as JxMutableNode;
   for (let i = base + 1; i <= target; i++) {
-    for (const op of snapshots[i].forwardOps ?? []) {
+    for (const op of snapshots[i]!.forwardOps ?? []) {
       applyDocOpToDoc(doc, op);
     }
   }
@@ -233,68 +259,42 @@ function materializeState(
  *
  * @param {Tab | null} tab
  * @param {(doc: JxMutableNode) => void} fn
- * @param {{ skipHistory?: boolean }} [opts]
+ * @param {{ skipHistory?: boolean; origin?: TransactOrigin }} [opts]
  */
 export function transact(
   tab: Tab | null,
   fn: (doc: JxMutableNode) => void,
-  opts?: { skipHistory?: boolean },
+  opts?: { skipHistory?: boolean; origin?: TransactOrigin },
 ) {
   transactDoc(tab, (t) => fn(t.doc.document), opts);
+}
+
+/**
+ * Apply externally-produced doc ops (a remote collaborator's edits) through the normal transaction
+ * pipeline: the canvas patches surgically exactly as it does for undo/redo replay, panels' effects
+ * fire, and — because the origin is "remote" — the transact observer will not republish them.
+ * History is skipped; while a collab session is attached, undo is delegated (see
+ * setHistoryDelegate) and local-only.
+ *
+ * @param {Tab} tab
+ * @param {JxDocOp[]} ops
+ */
+export function applyExternalDocOps(tab: Tab, ops: JxDocOp[]) {
+  transactDoc(
+    tab,
+    (t) => {
+      for (const op of ops) {
+        applyDocOp(t, op);
+      }
+    },
+    { origin: "remote", skipHistory: true },
+  );
 }
 
 // ─── Document-op application ─────────────────────────────────────────────────
 
 /** Document-level keys whose changes require a full scope/panel rebuild on the canvas. */
 const DOC_META_KEYS = new Set(["state", "$media", "$head", "$elements", "imports", "$layout"]);
-
-/**
- * Apply a replayable doc op to a bare document tree (history replay — no canvas recording).
- *
- * @param {JxMutableNode} doc
- * @param {JxDocOp} op
- */
-function applyDocOpToDoc(doc: JxMutableNode, op: JxDocOp) {
-  switch (op.op) {
-    case "set-key": {
-      const node = getNodeAtPath(doc, op.path);
-      if (!node) {
-        throw new Error(`doc-op-node-not-found:${op.path.join("/")}`);
-      }
-      if (op.value === undefined) {
-        delete node[op.key];
-      } else {
-        node[op.key] = cloneValue(op.value) as JxNodeValue;
-      }
-      return;
-    }
-    case "insert-child": {
-      const parent = getNodeAtPath(doc, op.parentPath);
-      childArray(parent).splice(op.index, 0, cloneValue(op.node) as JxMutableNode);
-      return;
-    }
-    case "remove-child": {
-      const parent = getNodeAtPath(doc, op.parentPath);
-      childArray(parent).splice(op.index, 1);
-      return;
-    }
-    case "set-child": {
-      const parent = getNodeAtPath(doc, op.parentPath);
-      childArray(parent).splice(op.index, 1, cloneValue(op.node) as JxMutableNode);
-      return;
-    }
-    case "move-child": {
-      const fromParent = getNodeAtPath(doc, op.fromParentPath);
-      const toParent = getNodeAtPath(doc, op.toParentPath);
-      const [node] = childArray(fromParent).splice(op.fromIndex, 1);
-      childArray(toParent).splice(op.toIndex, 0, node);
-      return;
-    }
-    default: {
-      throw new Error(`unknown-doc-op:${(op as JxDocOp).op}`);
-    }
-  }
-}
 
 /**
  * Apply a doc op to the live document AND record the matching canvas patch op, so undo/redo
@@ -351,13 +351,93 @@ function applyDocOp(tab: Tab, op: JxDocOp) {
   }
 }
 
+// ─── Batch (group multiple mutations into one undo step) ────────────────────
+
+let _batchTab: Tab | null = null;
+
+/** Module-level hook invoked when a batch closes (collab flushes its buffered ops as one step). */
+export type BatchEndNotifier = (tab: Tab) => void;
+
+let _batchEndNotifier: BatchEndNotifier | null = null;
+
+export function setBatchEndNotifier(fn: BatchEndNotifier | null) {
+  _batchEndNotifier = fn;
+}
+
+export function beginBatch(tab: Tab | null) {
+  _batchTab = tab;
+}
+
+export function endBatch() {
+  const tab = _batchTab;
+  // A history delegate owns undo grouping while registered; the snapshot push would be dead weight.
+  if (tab && !_historyDelegates.has(tab)) {
+    const raw = toRaw(tab.doc.document);
+    const snapshot = {
+      document: jsonClone(raw),
+      selection: tab.session.selection ? [...tab.session.selection] : null,
+    };
+    const truncated = tab.history.snapshots.slice(0, tab.history.index + 1);
+    truncated.push(snapshot);
+    if (truncated.length > HISTORY_LIMIT) {
+      truncated.shift();
+    }
+    tab.history.snapshots = truncated;
+    tab.history.index = truncated.length - 1;
+  }
+  _batchTab = null;
+  if (tab) {
+    _batchEndNotifier?.(tab);
+  }
+}
+
+export function isBatching(): boolean {
+  return _batchTab !== null;
+}
+
 // ─── Undo / Redo ─────────────────────────────────────────────────────────────
+
+/**
+ * Per-tab replacement for the built-in op-log history. While a delegate is registered (a collab
+ * session's Y.UndoManager), undo/redo route to it and the snapshot history is bypassed — keeping
+ * this module free of any yjs knowledge.
+ */
+export interface HistoryDelegate {
+  undo: (tab: Tab) => void;
+  redo: (tab: Tab) => void;
+  canUndo: (tab: Tab) => boolean;
+  canRedo: (tab: Tab) => boolean;
+}
+
+const _historyDelegates = new WeakMap<Tab, HistoryDelegate>();
+
+export function setHistoryDelegate(tab: Tab, delegate: HistoryDelegate | null) {
+  if (delegate) {
+    _historyDelegates.set(tab, delegate);
+  } else {
+    _historyDelegates.delete(tab);
+  }
+}
+
+export function getHistoryDelegate(tab: Tab): HistoryDelegate | null {
+  return _historyDelegates.get(tab) ?? null;
+}
+
+export function canUndo(tab: Tab): boolean {
+  const delegate = _historyDelegates.get(tab);
+  return delegate ? delegate.canUndo(tab) : tab.history.index > 0;
+}
+
+export function canRedo(tab: Tab): boolean {
+  const delegate = _historyDelegates.get(tab);
+  return delegate ? delegate.canRedo(tab) : tab.history.index < tab.history.snapshots.length - 1;
+}
 
 /** Restore a materialized snapshot state (full-render path). */
 function restoreState(tab: Tab, index: number) {
   const { snapshots } = tab.history;
   tab.doc.document = materializeState(snapshots, index);
-  const snap = snapshots[index];
+  const snap = snapshots[index]!;
   tab.session.selection = snap.selection ? [...toRaw(snap.selection)] : null;
 }
 
@@ -381,10 +461,15 @@ function assertHistoryConsistency(tab: Tab, index: number) {
 
 /** @param {Tab} tab */
 export function undo(tab: Tab) {
+  const delegate = _historyDelegates.get(tab);
+  if (delegate) {
+    delegate.undo(tab);
+    return;
+  }
   if (tab.history.index <= 0) {
     return;
   }
-  const entry = tab.history.snapshots[tab.history.index];
+  const entry = tab.history.snapshots[tab.history.index]!;
   const inverseOps = patchHistoryEnabled() ? entry.inverseOps : null;
   if (inverseOps && inverseOps.length > 0) {
     // Surgical path: apply inverse ops through the normal transaction pipeline (the canvas
@@ -396,7 +481,7 @@ export function undo(tab: Tab) {
           applyDocOp(t, toRaw(inverseOps[i]) as JxDocOp);
         }
       },
-      { skipHistory: true },
+      { origin: "history", skipHistory: true },
     );
     tab.session.selection = entry.selectionBefore ? [...toRaw(entry.selectionBefore)] : null;
     tab.history.index -= 1;
@@ -410,10 +495,15 @@ export function undo(tab: Tab) {
 
 /** @param {Tab} tab */
 export function redo(tab: Tab) {
+  const delegate = _historyDelegates.get(tab);
+  if (delegate) {
+    delegate.redo(tab);
+    return;
+  }
   if (tab.history.index >= tab.history.snapshots.length - 1) {
     return;
   }
-  const entry = tab.history.snapshots[tab.history.index + 1];
+  const entry = tab.history.snapshots[tab.history.index + 1]!;
   const forwardOps = patchHistoryEnabled() ? entry.forwardOps : null;
   if (forwardOps && forwardOps.length > 0) {
     transactDoc(
@@ -423,7 +513,7 @@ export function redo(tab: Tab) {
           applyDocOp(t, toRaw(op) as JxDocOp);
         }
       },
-      { skipHistory: true },
+      { origin: "history", skipHistory: true },
     );
     tab.session.selection = entry.selection ? [...toRaw(entry.selection)] : null;
     tab.history.index += 1;
@@ -828,9 +918,9 @@ export function mutateUpdateNestedStylePath(
     // Clean up empty parent objects
     let cur: JxStyle | undefined = node.style;
     for (let i = 0; i < stylePath.length && cur; i++) {
-      const child = getNestedStyle(cur, stylePath[i]);
+      const child = getNestedStyle(cur, stylePath[i]!);
       if (child && Object.keys(child).length === 0) {
-        delete cur[stylePath[i]];
+        delete cur[stylePath[i]!];
         break;
       }
       cur = child;
@@ -878,9 +968,9 @@ export function mutateUpdateMediaNestedStylePath(
     delete obj[prop];
     let cur: JxStyle | undefined = media;
     for (let i = 0; i < stylePath.length && cur; i++) {
-      const child = getNestedStyle(cur, stylePath[i]);
+      const child = getNestedStyle(cur, stylePath[i]!);
       if (child && Object.keys(child).length === 0) {
-        delete cur[stylePath[i]];
+        delete cur[stylePath[i]!];
         break;
       }
       cur = child;

@@ -268,6 +268,33 @@ describe("buildSite", () => {
     expect(redirectHtml).toContain('http-equiv="refresh"');
     expect(redirectHtml).toContain("/new");
   });
+
+  it("generates sitemap.xml from the route table", async () => {
+    await buildSite(TMP, { verbose: false });
+
+    const sitemap = readFileSync(resolve(TMP, "dist/sitemap.xml"), "utf8");
+    expect(sitemap).toContain('<?xml version="1.0" encoding="UTF-8"?>');
+    expect(sitemap).toContain('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">');
+
+    // <loc> matches the canonical-URL form (new URL — no trailing slash appended)
+    expect(sitemap).toContain("<loc>https://test.com/</loc>");
+    expect(sitemap).toContain("<loc>https://test.com/about</loc>");
+    expect(sitemap).toContain("<loc>https://test.com/blog</loc>");
+
+    // <lastmod> is a W3C date
+    expect(sitemap).toMatch(/<lastmod>\d{4}-\d{2}-\d{2}<\/lastmod>/);
+
+    // Redirect sources are not pages and must not appear
+    expect(sitemap).not.toContain("/old");
+  });
+
+  it("references the sitemap from robots.txt", async () => {
+    await buildSite(TMP, { verbose: false });
+
+    const robots = readFileSync(resolve(TMP, "dist/robots.txt"), "utf8");
+    expect(robots).toContain("User-agent: *"); // Preserved from public/robots.txt
+    expect(robots).toContain("Sitemap: https://test.com/sitemap.xml");
+  });
 });
 
 // ── Server worker generation ─────────────────────────────────────────────────
@@ -440,7 +467,7 @@ describe("buildSite — cloudflare images service", () => {
 
   // Cloudflare mode only reads image dimensions (no variant generation); mock sharp so the
   // Test doesn't depend on the native binary being loadable.
-  mock.module("sharp", () => ({
+  void mock.module("sharp", () => ({
     default: () => ({
       metadata: async () => ({ format: "png", height: 720, width: 1280 }),
     }),
@@ -544,6 +571,7 @@ describe("buildSite — missing pages/", () => {
   });
 
   it("throws when pages/ directory does not exist", async () => {
+    // oxlint-disable-next-line typescript/await-thenable -- bun:test async matcher returns a Promise; type-aware engine misresolves its return type
     await expect(buildSite(NO_PAGES_TMP)).rejects.toThrow("pages/ directory not found");
   });
 });
@@ -552,6 +580,9 @@ describe("buildSite — missing pages/", () => {
 
 describe("buildSite — optimized images cache-to-dist", () => {
   const OPT_TMP = resolve(import.meta.dir, "__test-site-opt-images__");
+  // Stand-in for the npm global cache dir, so the test controls the base instead of shelling out to
+  // `npm config get cache` (which is unavailable when npm is not on PATH, e.g. a stock Windows shell).
+  const NPM_CACHE = resolve(import.meta.dir, "__test-opt-npm-cache__");
 
   function setupProject() {
     rmSync(OPT_TMP, { force: true, recursive: true });
@@ -574,33 +605,26 @@ describe("buildSite — optimized images cache-to-dist", () => {
 
   afterAll(() => {
     rmSync(OPT_TMP, { force: true, recursive: true });
+    rmSync(NPM_CACHE, { force: true, recursive: true });
   });
 
   it("copies cached variants from the global npm cache dir to dist", async () => {
     setupProject();
-    _testResetNpmCacheBase();
-
-    // Discover the real npm cache path and pre-populate it as a prior build would have.
-    // Use cwd: tmpdir() to avoid ENOWORKSPACES when running inside an npm workspace.
-    const { execSync } = await import("node:child_process");
-    const { tmpdir } = await import("node:os");
-    const { basename, resolve: res } = await import("node:path");
-    const npmBase = execSync("npm config get cache", {
-      cwd: tmpdir(),
-      encoding: "utf8",
-    }).trim();
-    const npmOptDir = res(npmBase, "jxsuite-images", basename(OPT_TMP), "_optimized");
+    // Point the cache base at a controlled directory (no dependency on npm being installed). The
+    // Source resolves the cache dir as <base>/jxsuite-images/<project-basename>, so pre-populate
+    // That exact path as a prior build would have.
+    const { basename } = await import("node:path");
+    rmSync(NPM_CACHE, { force: true, recursive: true });
+    _testSetNpmCacheBase(NPM_CACHE);
+    const npmOptDir = resolve(NPM_CACHE, "jxsuite-images", basename(OPT_TMP), "_optimized");
     mkdirSync(npmOptDir, { recursive: true });
-    writeFileSync(res(npmOptDir, "npm-cached.webp"), "fake-webp", "utf8");
+    writeFileSync(resolve(npmOptDir, "npm-cached.webp"), "fake-webp", "utf8");
 
     try {
       await buildSite(OPT_TMP, { clean: true });
       expect(existsSync(resolve(OPT_TMP, "dist/images/_optimized/npm-cached.webp"))).toBe(true);
     } finally {
-      rmSync(res(npmBase, "jxsuite-images", basename(OPT_TMP)), {
-        force: true,
-        recursive: true,
-      });
+      rmSync(NPM_CACHE, { force: true, recursive: true });
       _testResetNpmCacheBase();
     }
   });
@@ -684,6 +708,80 @@ describe("buildSite — component CSS generation", () => {
     expect(html).toContain('href="/components/my-button.css"');
     // Component JS is bundled as app.js or per-component module
     expect(html).toContain('src="./app.js"');
+  });
+
+  it("writes the component JS sidecar into dist, never beside the source component", async () => {
+    await buildSite(COMP_TMP, { clean: true });
+    // The compiled custom-element module lands in dist/components/, mirroring the .css sidecar.
+    expect(existsSync(resolve(COMP_TMP, "dist/components/my-button.js"))).toBe(true);
+    // Regression guard (Windows): compileElement emits an absolute source path with the extension
+    // Swapped to .js. A forward-slash-only basename split left the full drive path intact, so the
+    // Write resolved back next to the source component instead of into dist.
+    expect(existsSync(resolve(COMP_TMP, "components/my-button.js"))).toBe(false);
+  });
+});
+
+// ── JSON-authored props.* attributes on component instances ─────────────────
+
+describe("buildSite — props.* attributes lift into $props for static render", () => {
+  const PROPS_TMP = resolve(import.meta.dir, "__test-site-props-attrs__");
+
+  beforeAll(() => {
+    rmSync(PROPS_TMP, { force: true, recursive: true });
+    mkdirSync(PROPS_TMP, { recursive: true });
+    writeFileSync(
+      resolve(PROPS_TMP, "project.json"),
+      JSON.stringify({ build: { outDir: "./dist" }, name: "Props Test" }),
+      "utf8",
+    );
+    mkdirSync(resolve(PROPS_TMP, "pages"), { recursive: true });
+    writeFileSync(
+      resolve(PROPS_TMP, "pages/index.json"),
+      JSON.stringify({
+        children: [
+          {
+            attributes: { id: "first", "props.label": "Go" },
+            tagName: "tag-chip",
+          },
+          {
+            $props: { label: "Explicit wins" },
+            attributes: { "props.label": "Attribute loses" },
+            tagName: "tag-chip",
+          },
+        ],
+        title: "Home",
+      }),
+      "utf8",
+    );
+    mkdirSync(resolve(PROPS_TMP, "components"), { recursive: true });
+    // Fully static component (no handlers/$prototype/$ref) — ships no JS, so the build-time
+    // Render is the only place props can be applied.
+    writeFileSync(
+      resolve(PROPS_TMP, "components/tag-chip.json"),
+      JSON.stringify({
+        children: [{ tagName: "span", textContent: "${state.label}" }],
+        state: { label: { default: "Default" } },
+        tagName: "tag-chip",
+      }),
+      "utf8",
+    );
+  });
+
+  afterAll(() => {
+    rmSync(PROPS_TMP, { force: true, recursive: true });
+  });
+
+  it("renders the interior with props.* values and does not leak the attributes", async () => {
+    await buildSite(PROPS_TMP, { clean: true });
+    const html = readFileSync(resolve(PROPS_TMP, "dist/index.html"), "utf8");
+    expect(html).toContain(">Go</span>");
+    expect(html).not.toContain("props.label");
+    expect(html).not.toContain(">Default</span>");
+    // Non-prop attributes survive the lift
+    expect(html).toContain('id="first"');
+    // Explicit $props takes precedence over a conflicting props.* attribute
+    expect(html).toContain(">Explicit wins</span>");
+    expect(html).not.toContain(">Attribute loses</span>");
   });
 });
 
@@ -1659,8 +1757,25 @@ describe("buildSite — expandComponents handles arrays in tree", () => {
       resolve(ARR_TMP, "pages/index.json"),
       JSON.stringify({
         $layout: "./layouts/main.json",
-        children: [{ tagName: "a-card" }, { tagName: "a-card" }],
+        children: [
+          { tagName: "a-card" },
+          // Instance with styled slot children → their styles are collected and injected.
+          {
+            children: [{ children: ["slotted"], style: { color: "green" }, tagName: "span" }],
+            tagName: "a-card",
+          },
+        ],
         title: "Home",
+      }),
+      "utf8",
+    );
+    // A page that uses no components — injectComponentScripts is invoked (components were
+    // Compiled) but finds none referenced on this page.
+    writeFileSync(
+      resolve(ARR_TMP, "pages/plain.json"),
+      JSON.stringify({
+        children: [{ children: ["No components here"], tagName: "h1" }],
+        title: "Plain",
       }),
       "utf8",
     );
@@ -1688,5 +1803,262 @@ describe("buildSite — expandComponents handles arrays in tree", () => {
     const matches = html.match(/Card Content/g);
     expect(matches).not.toBeNull();
     expect(matches?.length).toBeGreaterThanOrEqual(2);
+    // Styled slot content is collected and injected as a page style block.
+    expect(html).toContain("jxs-0");
+    expect(html).toContain("green");
+  });
+
+  it("leaves component-free pages untouched by script injection", async () => {
+    await buildSite(ARR_TMP);
+    const html = readFileSync(resolve(ARR_TMP, "dist/plain/index.html"), "utf8");
+    expect(html).toContain("No components here");
+    expect(html).not.toContain("a-card");
+  });
+});
+
+// ── Static expansion of array repeaters (whole-children + member among siblings) ──
+
+describe("buildSite — static repeater expansion", () => {
+  const REP_TMP = resolve(import.meta.dir, "__test-site-repeater__");
+
+  beforeAll(() => {
+    rmSync(REP_TMP, { force: true, recursive: true });
+    mkdirSync(resolve(REP_TMP, "pages"), { recursive: true });
+    writeFileSync(
+      resolve(REP_TMP, "project.json"),
+      JSON.stringify({ build: { outDir: "./dist" }, name: "Repeater Test" }),
+      "utf8",
+    );
+    writeFileSync(
+      resolve(REP_TMP, "pages/index.json"),
+      JSON.stringify({
+        children: [
+          {
+            // Whole-children repeater (legacy form) — items resolve at build time.
+            children: {
+              $prototype: "Array",
+              items: { $ref: "#/state/fruit" },
+              map: { tagName: "li", textContent: "${$map.item}" },
+            },
+            tagName: "ul",
+          },
+          {
+            // Array member nestled between static siblings.
+            children: [
+              { tagName: "li", textContent: "header" },
+              {
+                $prototype: "Array",
+                items: { $ref: "#/state/nums" },
+                map: { tagName: "li", textContent: "${$map.item}" },
+              },
+              { tagName: "li", textContent: "footer" },
+            ],
+            tagName: "ol",
+          },
+        ],
+        state: { fruit: { default: ["apple", "pear"] }, nums: { default: [1, 2, 3] } },
+        title: "Repeaters",
+      }),
+      "utf8",
+    );
+  });
+
+  afterAll(() => {
+    rmSync(REP_TMP, { force: true, recursive: true });
+  });
+
+  it("statically expands whole-children and member repeaters, wrapper-less", async () => {
+    const result = await buildSite(REP_TMP);
+    expect(result.errors).toHaveLength(0);
+    const html = readFileSync(resolve(REP_TMP, "dist/index.html"), "utf8");
+    // Whole-children repeater items render directly inside <ul> (no wrapper).
+    expect(html).toContain("apple");
+    expect(html).toContain("pear");
+    // Member repeater items render between the static siblings inside <ol>.
+    const ol = html.slice(html.indexOf("<ol"), html.indexOf("</ol>"));
+    expect(ol.indexOf("header")).toBeLessThan(ol.indexOf("1"));
+    expect(ol.indexOf("3")).toBeLessThan(ol.indexOf("footer"));
+    // No throwaway wrapper div around the repeated items.
+    expect(html).not.toContain("repeater-perimeter");
+  });
+});
+
+// ── Static expansion of map templates with style/attributes/$props/children ──
+
+describe("buildSite — rich map template expansion", () => {
+  const MAP_TMP = resolve(import.meta.dir, "__test-site-map-template__");
+
+  beforeAll(() => {
+    rmSync(MAP_TMP, { force: true, recursive: true });
+    mkdirSync(resolve(MAP_TMP, "pages"), { recursive: true });
+    writeFileSync(
+      resolve(MAP_TMP, "project.json"),
+      JSON.stringify({
+        // A site-level head entry with no attributes exercises the bare-specifier passthrough.
+        $head: [{ children: ["body{margin:0}"], tagName: "style" }],
+        build: { outDir: "./dist" },
+        name: "Map Tpl",
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      resolve(MAP_TMP, "pages/index.json"),
+      JSON.stringify({
+        children: [
+          {
+            // Whole-children repeater with a rich map template: the map node carries
+            // Style, attributes, $props, nested children, a multi-part template and an
+            // Erroring template (kept verbatim when evaluation throws).
+            children: {
+              $prototype: "Array",
+              items: { $ref: "#/state/posts" },
+              map: {
+                $props: { label: "${item.title}" },
+                attributes: { "data-id": "${item.id}" },
+                children: [
+                  { tagName: "h2", textContent: "Post: ${item.title}" },
+                  { tagName: "small", textContent: "${item.missing.deep}" },
+                  "static-sep",
+                ],
+                style: { color: "${item.color}" },
+                tagName: "article",
+              },
+            },
+            tagName: "section",
+          },
+          {
+            // Items provided as a literal array (not a $ref).
+            children: {
+              $prototype: "Array",
+              items: [{ title: "Lit1" }, { title: "Lit2" }],
+              map: { tagName: "li", textContent: "${item.title}" },
+            },
+            tagName: "ul",
+          },
+          {
+            // Items resolves to a non-array → left for client-side rendering (no static expansion).
+            children: {
+              $prototype: "Array",
+              items: { $ref: "#/state/notList" },
+              map: { tagName: "span", textContent: "${item}" },
+            },
+            tagName: "div",
+          },
+          {
+            // String map template — returned verbatim per item.
+            children: { $prototype: "Array", items: [1, 2], map: "plain-item" },
+            tagName: "p",
+          },
+          {
+            // $props template on a (non-component) element resolves against page state.
+            $props: { tone: "${pageTone}" },
+            tagName: "x-tone",
+          },
+          {
+            // String child whose template resolves to an array of nodes (spliced in place).
+            children: ["${state.frags}"],
+            tagName: "aside",
+          },
+        ],
+        state: {
+          frags: { default: [{ tagName: "b", textContent: "BOLD" }] },
+          notList: { default: "not an array" },
+          pageTone: { default: "warm" },
+          posts: {
+            default: [
+              { color: "red", id: "1", title: "First" },
+              { color: "blue", id: "2", title: "Second" },
+            ],
+          },
+        },
+        title: "Mapped",
+      }),
+      "utf8",
+    );
+  });
+
+  afterAll(() => {
+    rmSync(MAP_TMP, { force: true, recursive: true });
+  });
+
+  it("expands map templates with style, attributes, $props and nested children", async () => {
+    const result = await buildSite(MAP_TMP);
+    expect(result.errors).toHaveLength(0);
+    const html = readFileSync(resolve(MAP_TMP, "dist/index.html"), "utf8");
+    // Nested children + multi-part template resolved per item.
+    expect(html).toContain("Post: First");
+    expect(html).toContain("Post: Second");
+    // Attribute template resolved per item.
+    expect(html).toContain('data-id="1"');
+    expect(html).toContain('data-id="2"');
+    // Static string child preserved.
+    expect(html).toContain("static-sep");
+    // Literal-array items expanded.
+    expect(html).toContain("Lit1");
+    expect(html).toContain("Lit2");
+    // Style template resolved (emitted in a style block).
+    expect(html).toContain("red");
+    expect(html).toContain("blue");
+    // String map template returned verbatim.
+    expect(html).toContain("plain-item");
+    // $props template resolved against page state.
+    expect(html).toContain("x-tone");
+    // String child template resolving to an array of nodes is spliced in.
+    expect(html).toContain("BOLD");
+  });
+});
+
+// ── Sitemap options ──────────────────────────────────────────────────────────
+
+describe("buildSite — sitemap options", () => {
+  const SM_TMP = resolve(import.meta.dir, "__test-site-sitemap__");
+
+  function writeSite(config: Record<string, unknown>) {
+    rmSync(SM_TMP, { force: true, recursive: true });
+    mkdirSync(resolve(SM_TMP, "pages"), { recursive: true });
+    writeFileSync(resolve(SM_TMP, "project.json"), JSON.stringify(config), "utf8");
+    writeFileSync(
+      resolve(SM_TMP, "pages/index.json"),
+      JSON.stringify({ children: [{ children: ["Home"], tagName: "h1" }], title: "Home" }),
+      "utf8",
+    );
+    writeFileSync(
+      resolve(SM_TMP, "pages/secret.json"),
+      JSON.stringify({
+        $sitemap: false,
+        children: [{ children: ["Secret"], tagName: "h1" }],
+        title: "Secret",
+      }),
+      "utf8",
+    );
+  }
+
+  afterAll(() => {
+    rmSync(SM_TMP, { force: true, recursive: true });
+  });
+
+  it("excludes pages that opt out with $sitemap: false", async () => {
+    writeSite({ build: { outDir: "./dist" }, name: "SM", url: "https://sm.test" });
+    await buildSite(SM_TMP);
+
+    const sitemap = readFileSync(resolve(SM_TMP, "dist/sitemap.xml"), "utf8");
+    expect(sitemap).toContain("<loc>https://sm.test/</loc>");
+    expect(sitemap).not.toContain("/secret");
+  });
+
+  it("skips sitemap.xml when build.sitemap is false", async () => {
+    writeSite({ build: { outDir: "./dist", sitemap: false }, name: "SM", url: "https://sm.test" });
+    await buildSite(SM_TMP);
+
+    expect(existsSync(resolve(SM_TMP, "dist/sitemap.xml"))).toBe(false);
+  });
+
+  it("skips sitemap generation when no url is configured", async () => {
+    writeSite({ build: { outDir: "./dist" }, name: "SM" });
+    await buildSite(SM_TMP);
+
+    expect(existsSync(resolve(SM_TMP, "dist/sitemap.xml"))).toBe(false);
+    // Robots.txt is not created just to add a Sitemap line we can't build
+    expect(existsSync(resolve(SM_TMP, "dist/robots.txt"))).toBe(false);
   });
 });

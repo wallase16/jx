@@ -13,11 +13,13 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { isMappedArray, isRef } from "@jxsuite/schema/guards";
 import { loadProjectConfig } from "./site-loader.ts";
 import { discoverPages, expandDynamicRoutes, readPageDocument } from "./pages-discovery.ts";
@@ -54,6 +56,7 @@ import type {
   JxAttributeValue,
   JxElement,
   JxHeadEntry,
+  JxMappedArray,
   JxMutableNode,
   JxStateDefinition,
   JxStyle,
@@ -157,7 +160,11 @@ export async function buildSite(
           formats: formatRegistry,
         });
         for (const f of result.files) {
-          const outName = f.path.includes("/") ? (f.path.split("/").pop() as string) : f.path;
+          // Reduce the emitted path (an absolute source path with .json swapped to .js) to a bare
+          // Filename for the dist/components/ output. basename handles both / and \ — a
+          // Forward-slash-only split left the full drive path on Windows, so resolve() then wrote
+          // The sidecar back into the source tree instead of dist.
+          const outName = basename(f.path);
           writeFileSync(resolve(componentOutDir, outName), f.content, "utf8");
           if (f.tagName) {
             compiledComponentTags.push(f.tagName);
@@ -188,8 +195,7 @@ export async function buildSite(
   }
 
   // ── 5b. Collect server entries from components (for site-wide bundling) ──
-  /** @type {{ exportName: string; src: string }[]} */
-  const siteServerEntries = [];
+  const siteServerEntries: { exportName: string; src: string }[] = [];
   if (projectConfig.build.adapter) {
     for (const [, doc] of componentDefs) {
       const entries = collectServerEntries(doc);
@@ -207,8 +213,7 @@ export async function buildSite(
 
   const cfImages = projectConfig.images.optimize && projectConfig.images.service === "cloudflare";
   const imageCache = projectConfig.images.optimize && !cfImages ? loadCache(projectRoot) : null;
-  /** @type {import("./image-transform.ts").ImageMetaCache | null} */
-  const imageMetaCache = cfImages ? new Map() : null;
+  const imageMetaCache: ImageMetaCache | null = cfImages ? new Map() : null;
   if (cfImages) {
     console.log(
       `images.service is "cloudflare" — srcsets use /cdn-cgi/image transform URLs. ` +
@@ -216,6 +221,12 @@ export async function buildSite(
         `Images → Transformations); these URLs do not work on *.pages.dev / *.workers.dev previews.`,
     );
   }
+
+  // Sitemap is generated from the route table when a production `url` is configured
+  // (absolute <loc> URLs require it) and not explicitly disabled via build.sitemap: false.
+  const siteUrl = projectConfig.url;
+  const sitemapEnabled = Boolean(siteUrl) && projectConfig.build.sitemap !== false;
+  const sitemapEntries: { loc: string; lastmod: Date }[] = [];
 
   for (const route of routes) {
     try {
@@ -255,6 +266,17 @@ export async function buildSite(
       writeFileSync(outPath, result.html, "utf8");
       fileCount += 1;
 
+      // Record a sitemap entry for this concrete page (skip unexpanded dynamic routes and
+      // Pages that opted out via $sitemap: false). <loc> is built like the canonical URL so
+      // The two always agree.
+      const isConcrete = !route.urlPattern.includes(":") && !route.urlPattern.includes("*");
+      if (sitemapEnabled && !result.excludeFromSitemap && isConcrete) {
+        sitemapEntries.push({
+          lastmod: statSync(route.sourcePath).mtime,
+          loc: new URL(route.urlPattern, siteUrl).href,
+        });
+      }
+
       // Write serialized export sidecars alongside HTML (formats with exportTarget: true)
       for (const fmt of formatRegistry.withCapability("serialize")) {
         if (!fmt.exportTarget) {
@@ -274,7 +296,7 @@ export async function buildSite(
             mode: "export",
           })) as string;
           if (content) {
-            const sidecarPath = outPath.replace(/\.html$/, fmt.extensions[0]);
+            const sidecarPath = outPath.replace(/\.html$/, fmt.extensions[0]!);
             writeFileSync(sidecarPath, content, "utf8");
             fileCount += 1;
           }
@@ -326,7 +348,7 @@ export async function buildSite(
     const { adapter } = projectConfig.build;
     log("Generating site-wide server worker...");
 
-    const deduped = new Map();
+    const deduped = new Map<string, { exportName: string; src: string }>();
     for (const entry of siteServerEntries) {
       if (!deduped.has(entry.exportName)) {
         deduped.set(entry.exportName, entry);
@@ -375,10 +397,24 @@ export async function buildSite(
     fileCount += redirectFiles;
   }
 
-  // ── 7. Copy public/ assets ──────────────────────────────────────────────
+  // ── 7b. Generate sitemap.xml ────────────────────────────────────────────
+  if (sitemapEnabled) {
+    log(`Generating sitemap (${sitemapEntries.length} URL(s))...`);
+    fileCount += generateSitemap(sitemapEntries, outDir);
+  } else if (!siteUrl && projectConfig.build.sitemap !== false) {
+    console.warn("sitemap.xml skipped — set `url` in project.json to enable sitemap generation.");
+  }
+
+  // ── 7c. Copy public/ assets ─────────────────────────────────────────────
   if (existsSync(publicDir)) {
     log("Copying public/ assets...");
     cpSync(publicDir, outDir, { recursive: true });
+  }
+
+  // ── 7d. Reference the sitemap from robots.txt ───────────────────────────
+  // Runs after the public/ copy so it edits the deployed dist/robots.txt.
+  if (sitemapEnabled) {
+    fileCount += ensureRobotsSitemap(outDir, siteUrl);
   }
 
   // ── 8. Copy declarative file mappings ──────────────────────────────────
@@ -460,7 +496,7 @@ async function compilePage(
   // Determine the page title — resolve template strings against the scope
   let title = pageTitle ?? projectConfig.name ?? "Jx Site";
   if (typeof title === "string" && isTemplateString(title)) {
-    title = evaluateStaticTemplate(title, scope) ?? (title as string);
+    title = (evaluateStaticTemplate(title, scope) as string | null) ?? (title as string);
   }
 
   // Resolve template strings in $head entries
@@ -572,6 +608,9 @@ async function compilePage(
 
   return {
     doc: layoutDoc,
+    // A page opts out of the sitemap by setting `$sitemap: false` (interim escape hatch
+    // Until draft filtering lands in the build pipeline).
+    excludeFromSitemap: pageDoc.$sitemap === false,
     files: result.files,
     html: result.html,
     serverHandler,
@@ -595,14 +634,16 @@ function resolveHeadTemplates(headEntries: JxHeadEntry[], scope: Record<string, 
       resolved.attributes = { ...resolved.attributes };
       for (const [k, v] of Object.entries(resolved.attributes)) {
         if (typeof v === "string" && isTemplateString(v)) {
-          resolved.attributes[k] = evaluateStaticTemplate(v, scope) ?? (v as string | boolean);
+          resolved.attributes[k] =
+            (evaluateStaticTemplate(v, scope) as string | boolean | null) ??
+            (v as string | boolean);
         }
       }
     }
     if (typeof resolved.textContent === "string" && isTemplateString(resolved.textContent)) {
       resolved.textContent =
-        evaluateStaticTemplate(resolved.textContent, scope) ??
-        (resolved.textContent as string | undefined);
+        (evaluateStaticTemplate(resolved.textContent, scope) as string | null) ??
+        resolved.textContent;
     }
     return resolved;
   });
@@ -662,11 +703,11 @@ function expandMapTemplate(template: JxElement, scope: Record<string, unknown>):
   const node = {} as JxElement;
   for (const [k, v] of Object.entries(template)) {
     if (k === "children" && Array.isArray(v)) {
-      node.children = v.map((child) => {
+      node.children = (v as (string | JxElement)[]).map((child) => {
         if (typeof child === "string") {
           return child;
         }
-        return expandMapTemplate(/** @type {JxMutableNode} */ child, scope);
+        return expandMapTemplate(child, scope);
       });
     } else if (k === "style" && v && typeof v === "object") {
       const style: JxStyle = { ...(v as JxStyle) };
@@ -718,10 +759,26 @@ function evaluateMapTemplate(str: string, scope: Record<string, unknown>) {
     const index = (scope.$map as Record<string, unknown>)?.index;
     const singleExprMatch = str.match(/^\$\{(.+)\}$/s);
     if (singleExprMatch) {
-      const fn = new Function("state", "$map", "item", "index", `return (${singleExprMatch[1]})`);
+      const fn = new Function(
+        "state",
+        "$map",
+        "item",
+        "index",
+        `return (${singleExprMatch[1]})`,
+      ) as (
+        state: Record<string, unknown>,
+        $map: unknown,
+        item: unknown,
+        index: unknown,
+      ) => unknown;
       return fn(scope, scope.$map, item, index);
     }
-    const fn = new Function("state", "$map", "item", "index", `return \`${str}\``);
+    const fn = new Function("state", "$map", "item", "index", `return \`${str}\``) as (
+      state: Record<string, unknown>,
+      $map: unknown,
+      item: unknown,
+      index: unknown,
+    ) => unknown;
     return fn(scope, scope.$map, item, index);
   } catch {
     return null;
@@ -751,49 +808,38 @@ function resolveDocTemplates(node: JxElement | string, scope: Record<string, unk
   }
   if (typeof node.textContent === "string" && isTemplateString(node.textContent)) {
     node.textContent =
-      evaluateStaticTemplate(node.textContent, scope) ?? (node.textContent as string | null);
+      (evaluateStaticTemplate(node.textContent, scope) as string | null) ??
+      (node.textContent as string | null);
   }
   if (node.style && typeof node.style === "object") {
     for (const [k, v] of Object.entries(node.style)) {
       if (typeof v === "string" && isTemplateString(v)) {
-        node.style[k] = evaluateStaticTemplate(v, scope) ?? (v as string | number | JxStyle);
+        node.style[k] =
+          (evaluateStaticTemplate(v, scope) as string | number | JxStyle | undefined) ??
+          (v as string | number | JxStyle);
       }
     }
   }
   if (node.attributes && typeof node.attributes === "object") {
     for (const [k, v] of Object.entries(node.attributes)) {
       if (typeof v === "string" && isTemplateString(v)) {
-        node.attributes[k] = evaluateStaticTemplate(v, scope) ?? v;
+        node.attributes[k] = (evaluateStaticTemplate(v, scope) as JxAttributeValue | null) ?? v;
       }
     }
   }
   if (node.$props && typeof node.$props === "object") {
     for (const [k, v] of Object.entries(node.$props)) {
       if (typeof v === "string" && isTemplateString(v)) {
-        node.$props[k] = evaluateStaticTemplate(v, scope) ?? v;
+        node.$props[k] = (evaluateStaticTemplate(v, scope) as JsonValue | null) ?? v;
       }
     }
   }
   const rawChildren = node.children;
+  // Legacy whole-children repeater: expand the items into the node's static children.
   if (isMappedArray(rawChildren)) {
-    const itemsSrc = rawChildren.items;
-    let items = null;
-    if (isRef(itemsSrc)) {
-      items = resolveRefValue(itemsSrc.$ref, scope);
-    } else if (Array.isArray(itemsSrc)) {
-      items = itemsSrc;
-    }
-    const mapTemplate = rawChildren.map;
-    if (Array.isArray(items) && mapTemplate) {
-      node.children = items.map((item, index) => {
-        const childScope = Object.create(scope);
-        childScope.$map = { index, item };
-        childScope["$map/item"] = item;
-        childScope["$map/index"] = index;
-        const expanded = expandMapTemplate(mapTemplate, childScope);
-        resolveDocTemplates(expanded, childScope);
-        return expanded;
-      });
+    const expanded = expandMappedArrayStatic(rawChildren, scope);
+    if (expanded) {
+      node.children = expanded;
       return;
     }
   }
@@ -809,7 +855,7 @@ function resolveDocTemplates(node: JxElement | string, scope: Record<string, unk
   } else if (Array.isArray(node.children)) {
     let i = 0;
     while (i < node.children.length) {
-      const child = node.children[i];
+      const child = node.children[i]!;
       if (typeof child === "string" && isTemplateString(child)) {
         const resolved = evaluateStaticTemplate(child, scope);
         if (Array.isArray(resolved)) {
@@ -822,10 +868,53 @@ function resolveDocTemplates(node: JxElement | string, scope: Record<string, unk
           continue;
         }
       }
+      // Array pseudo-element among siblings: expand its items in place.
+      if (isMappedArray(child)) {
+        const expanded = expandMappedArrayStatic(child, scope);
+        if (expanded) {
+          node.children.splice(i, 1, ...expanded);
+          i += expanded.length;
+          continue;
+        }
+      }
       resolveDocTemplates(child, scope);
       i += 1;
     }
   }
+}
+
+/**
+ * Statically expand a mapped array to its resolved item nodes when `items` resolves to an array at
+ * build time, or null otherwise (leave the array node for client-side rendering).
+ *
+ * @param {JxMappedArray} arrayDef
+ * @param {Record<string, unknown>} scope
+ * @returns {(JxElement | string)[] | null}
+ */
+function expandMappedArrayStatic(
+  arrayDef: JxMappedArray,
+  scope: Record<string, unknown>,
+): (JxElement | string)[] | null {
+  const itemsSrc = arrayDef.items;
+  let items: unknown = null;
+  if (isRef(itemsSrc)) {
+    items = resolveRefValue(itemsSrc.$ref, scope);
+  } else if (Array.isArray(itemsSrc)) {
+    items = itemsSrc;
+  }
+  const mapTemplate = arrayDef.map;
+  if (!Array.isArray(items) || !mapTemplate) {
+    return null;
+  }
+  return (items as unknown[]).map((item: unknown, index) => {
+    const childScope = Object.create(scope) as Record<string, unknown>;
+    childScope.$map = { index, item };
+    childScope["$map/item"] = item;
+    childScope["$map/index"] = index;
+    const expanded = expandMapTemplate(mapTemplate, childScope);
+    resolveDocTemplates(expanded, childScope);
+    return expanded;
+  });
 }
 
 /** Collector for CSS rules extracted from component slot content during expansion. */
@@ -853,7 +942,7 @@ function expandComponents(
     return;
   }
   if (Array.isArray(node)) {
-    for (const n of node) {
+    for (const n of node as (JxElement | string)[]) {
       expandComponents(n, componentDefs, slotCss);
     }
     return;
@@ -868,6 +957,27 @@ function expandComponents(
 
   const def = componentDefs.get(node.tagName as string);
   if (def) {
+    // JSON-authored instances pass props as literal `props.*` attribute keys (markdown directives
+    // Are normalized to $props by the parser's expandDotPaths, but JSON is parsed verbatim).
+    // Lift them into $props so the pre-render sees them, and strip them from attributes so they
+    // Don't leak into the emitted HTML. Values stay raw strings — no coercion, matching the
+    // Markdown path and the runtime's $props semantics. Explicit $props wins on key conflicts.
+    if (node.attributes) {
+      let lifted: NonNullable<JxElement["$props"]> | null = null;
+      for (const [key, value] of Object.entries(node.attributes)) {
+        if (key.startsWith("props.") && key.length > "props.".length) {
+          lifted ??= {};
+          // JxAttributeValue is JSON-representable (primitives or a $ref object), so the
+          // Narrowing to JsonValue is sound.
+          lifted[key.slice("props.".length)] = value as JsonValue;
+          delete node.attributes[key];
+        }
+      }
+      if (lifted) {
+        node.$props = { ...lifted, ...node.$props };
+      }
+    }
+
     const slotContent =
       Array.isArray(node.children) && node.children.length > 0
         ? node.children
@@ -1012,11 +1122,11 @@ function injectHead(html: string, headEntries: JxHeadEntry[], lang: string) {
   const existingMatch = html.match(headPattern);
   let preservedBlocks = "";
   if (existingMatch) {
-    const styles = existingMatch[1].match(/<style>[\s\S]*?<\/style>/gi);
+    const styles = existingMatch[1]!.match(/<style>[\s\S]*?<\/style>/gi);
     if (styles) {
       preservedBlocks += `\n  ${styles.join("\n  ")}`;
     }
-    const scripts = existingMatch[1].match(/<script[\s\S]*?<\/script>/gi);
+    const scripts = existingMatch[1]!.match(/<script[\s\S]*?<\/script>/gi);
     if (scripts) {
       preservedBlocks += `\n  ${scripts.join("\n  ")}`;
     }
@@ -1131,4 +1241,70 @@ function escapeHtml(str: string) {
  */
 function escapeAttr(str: string) {
   return String(str).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+}
+
+/**
+ * Escape a value for inclusion in XML text (e.g. a sitemap `<loc>`). Handles the five predefined
+ * XML entities — `&` must be first so the others aren't double-escaped.
+ *
+ * @param {string} str
+ * @returns {string}
+ */
+function escapeXml(str: string) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+/**
+ * Write a sitemap.xml from the collected page entries (sitemaps.org urlset 0.9). Each entry emits a
+ * `<loc>` plus a `<lastmod>` date (W3C YYYY-MM-DD).
+ *
+ * @param {{ loc: string; lastmod: Date }[]} entries
+ * @param {string} outDir
+ * @returns {number} Number of files written
+ */
+function generateSitemap(entries: { loc: string; lastmod: Date }[], outDir: string) {
+  if (entries.length === 0) {
+    return 0;
+  }
+  const urls = entries
+    .map(
+      (e) =>
+        `  <url>\n    <loc>${escapeXml(e.loc)}</loc>\n` +
+        `    <lastmod>${e.lastmod.toISOString().slice(0, 10)}</lastmod>\n  </url>`,
+    )
+    .join("\n");
+  const xml =
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`;
+  writeFileSync(join(outDir, "sitemap.xml"), xml, "utf8");
+  return 1;
+}
+
+/**
+ * Ensure dist/robots.txt references the sitemap. Appends a `Sitemap:` line to an existing
+ * robots.txt (creating a permissive default if none was copied from public/), unless one is already
+ * present.
+ *
+ * @param {string} outDir
+ * @param {string} siteUrl
+ * @returns {number} Number of files newly created (0 if robots.txt already existed)
+ */
+function ensureRobotsSitemap(outDir: string, siteUrl: string) {
+  const robotsPath = join(outDir, "robots.txt");
+  const existed = existsSync(robotsPath);
+  let content = existed ? readFileSync(robotsPath, "utf8") : "User-agent: *\nAllow: /\n";
+  if (/^Sitemap:/im.test(content)) {
+    return 0;
+  }
+  if (!content.endsWith("\n")) {
+    content += "\n";
+  }
+  content += `\nSitemap: ${new URL("/sitemap.xml", siteUrl).href}\n`;
+  writeFileSync(robotsPath, content, "utf8");
+  return existed ? 0 : 1;
 }

@@ -13,12 +13,15 @@
  *   proxying, and studio filesystem integration as a single createDevServer() call.
  */
 
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { buildAll } from "./build.ts";
+import { createCollabRegistry } from "./collab.ts";
 import { createWatcher, injectSSE } from "./watch.ts";
 import { handleResolve, handleServerFunction } from "./resolve.ts";
-import { handleStudioApi } from "./studio-api.ts";
+import { assertAccessible, handleStudioApi } from "./studio-api.ts";
 import { handleCodeApi } from "./code-api.ts";
+import { handleAiApi } from "./ai-api.ts";
+import { handleImportApi } from "./import-api.ts";
 import { existsSync, readFileSync } from "node:fs";
 
 /**
@@ -30,6 +33,14 @@ import { existsSync, readFileSync } from "node:fs";
  * @param {string} urlPath - URL pathname (e.g. "/pages/@jxsuite/parser/Foo.class.json")
  * @returns {string | null} Absolute file path or null
  */
+interface PackageJson {
+  exports?: Record<string, string | { import?: string; default?: string }>;
+  customElements?: string;
+  module?: string;
+  main?: string;
+  [key: string]: unknown;
+}
+
 function resolveNpmPath(rootDir: string, urlPath: string) {
   let root = rootDir;
   let segments = urlPath.split("/").filter(Boolean);
@@ -49,7 +60,7 @@ function resolveNpmPath(rootDir: string, urlPath: string) {
   let start = -1;
   let isScoped = false;
   for (let i = 0; i < segments.length; i++) {
-    if (segments[i].startsWith("@")) {
+    if (segments[i]!.startsWith("@")) {
       start = i;
       isScoped = true;
       break;
@@ -63,14 +74,14 @@ function resolveNpmPath(rootDir: string, urlPath: string) {
     if (start < 0 || start + 1 >= segments.length) {
       return null;
     }
-    const scope = segments[start];
-    const pkg = segments[start + 1];
+    const scope = segments[start]!;
+    const pkg = segments[start + 1]!;
     subpath = segments.slice(start + 2).join("/");
     pkgDir = join(root, "node_modules", scope, pkg);
   } else {
     // Unscoped: try each segment as a package name in node_modules
     for (let i = 0; i < segments.length; i++) {
-      const candidate = join(root, "node_modules", segments[i]);
+      const candidate = join(root, "node_modules", segments[i]!);
       if (existsSync(join(candidate, "package.json"))) {
         start = i;
         pkgDir = candidate;
@@ -91,10 +102,11 @@ function resolveNpmPath(rootDir: string, urlPath: string) {
   // If there's a subpath, check package.json exports first
   if (subpath) {
     try {
-      const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+      const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as PackageJson;
       const exportKey = `./${subpath}`;
-      if (pkgJson.exports && pkgJson.exports[exportKey]) {
-        const mapped = join(pkgDir, pkgJson.exports[exportKey]);
+      const exportVal = pkgJson.exports?.[exportKey];
+      if (typeof exportVal === "string") {
+        const mapped = join(pkgDir, exportVal);
         if (existsSync(mapped)) {
           return mapped;
         }
@@ -107,7 +119,7 @@ function resolveNpmPath(rootDir: string, urlPath: string) {
     }
     // CEM-relative: subpath may be relative to the custom elements manifest directory
     try {
-      const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+      const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as PackageJson;
       if (pkgJson.customElements) {
         const cemDir = pkgJson.customElements.replace(/\/[^/]+$/, "");
         const cemRelative = join(pkgDir, cemDir, subpath);
@@ -120,7 +132,7 @@ function resolveNpmPath(rootDir: string, urlPath: string) {
 
   // Bare package (no subpath): resolve entry point
   try {
-    const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+    const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as PackageJson;
     const exp = pkgJson.exports?.["."];
     const entry =
       (typeof exp === "object" ? (exp.import ?? exp.default) : exp) ??
@@ -193,22 +205,46 @@ export async function createDevServer(options: {
   // ─── File watcher + SSE ─────────────────────────────────────────────────────
 
   let handleSSE = null;
+  let fsWatcher: ReturnType<typeof createWatcher>["watcher"] | null = null;
   if (watch !== false) {
     const watchOpts = typeof watch === "object" ? watch : {};
     const watcher = createWatcher(absRoot, builds, watchOpts);
     ({ handleSSE } = watcher);
+    fsWatcher = watcher.watcher;
   }
 
   // Bundle cache for npm packages (bare specifier → bundled JS)
   const bundleCache = new Map<string, string>();
 
+  // Dev-server cache policy: always revalidate. Without any Cache-Control the browser HEURISTICALLY
+  // Caches responses (there are no validators either), so a plain reload can serve a stale
+  // Studio.js/canvas bundle — which shows up as half-updated UI after a rebuild (the iframe assets
+  // Are query-cache-busted per mount, the parent bundle is not).
+  const NO_CACHE = { "Cache-Control": "no-cache" };
+  const fileResponse = (file: ReturnType<typeof Bun.file>) =>
+    new Response(file, { headers: NO_CACHE });
+
   // Active studio project root (set via /__studio/activate, used for static file fallback)
   let activeProjectRoot: string | null = null;
+
+  // ─── Realtime co-editing (/__studio/collab) ─────────────────────────────────
+
+  // Created unconditionally (it is inert until an upgrade) so Bun.serve always has real
+  // Websocket handlers; the route below is what gates the capability on enableStudio.
+  const collabRegistry = createCollabRegistry({
+    absRoot,
+    activeProjectRoot: () => activeProjectRoot,
+  });
+  if (enableStudio && fsWatcher) {
+    fsWatcher.on("change", (changedPath: string) => {
+      collabRegistry.handleExternalChange(resolve(absRoot, changedPath));
+    });
+  }
 
   // ─── HTTP server ────────────────────────────────────────────────────────────
 
   const server = Bun.serve({
-    async fetch(req) {
+    async fetch(req, bunServer) {
       const url = new URL(req.url);
       let path = decodeURIComponent(url.pathname);
       if (path.endsWith("/")) {
@@ -234,13 +270,37 @@ export async function createDevServer(options: {
 
       // Studio filesystem API
       if (enableStudio && path.startsWith("/__studio/")) {
+        // Realtime co-editing: WebSocket upgrade or capability probe
+        if (path === "/__studio/collab") {
+          return collabRegistry.handleRequest(req, bunServer);
+        }
+
         // Activate project — tells the server which project root to use for static file fallback
         if (path === "/__studio/activate" && req.method === "POST") {
-          const body = await req.json();
+          const body = (await req.json()) as { root?: string };
           const raw = body.root || null;
           // Always store as absolute path
           activeProjectRoot = raw ? resolve(absRoot, raw) : null;
           return Response.json({ ok: true, root: activeProjectRoot });
+        }
+
+        // AI proxy endpoints (/__studio/ai/chat, /__studio/ai/models)
+        const aiRes = await handleAiApi(req, url);
+        if (aiRes) {
+          return aiRes;
+        }
+
+        // AI-guided site import (/__studio/import-site) — NDJSON progress stream
+        const importRes = await handleImportApi(req, url, {
+          resolveDest: (dir) => {
+            const dest = resolve(absRoot, dir);
+            assertAccessible(dest, absRoot, activeProjectRoot);
+            return dest;
+          },
+          toRoot: (dest) => relative(absRoot, dest).replaceAll("\\", "/"),
+        });
+        if (importRes) {
+          return importRes;
         }
 
         const codeRes = await handleCodeApi(req, url);
@@ -265,12 +325,15 @@ export async function createDevServer(options: {
       // Static files
 
       // If the URL path is an absolute filesystem path under the active project, serve directly.
-      // Browsers produce "//abs/path" when an absolute path is used as a URL path — normalise.
-      const fsPath = path.startsWith("//") ? path.slice(1) : path;
-      if (activeProjectRoot && fsPath.startsWith(activeProjectRoot)) {
+      // A POSIX absolute path arrives as "//abs/path"; a Windows one as "/C:/dir/file" (leading
+      // Slash + forward slashes), so drop the slash before the drive letter. Compare with
+      // Separators normalised, since activeProjectRoot is OS-native (backslashes on Windows).
+      const fsPath = path.startsWith("//") ? path.slice(1) : path.replace(/^\/([A-Za-z]:)/, "$1");
+      const normSep = (p: string) => p.replaceAll("\\", "/");
+      if (activeProjectRoot && normSep(fsPath).startsWith(normSep(activeProjectRoot))) {
         const file = Bun.file(fsPath);
         if (await file.exists()) {
-          return new Response(file);
+          return fileResponse(file);
         }
       }
 
@@ -280,12 +343,12 @@ export async function createDevServer(options: {
         if (activeProjectRoot) {
           const projectFile = Bun.file(resolve(activeProjectRoot, `.${path}`));
           if (await projectFile.exists()) {
-            return new Response(projectFile);
+            return fileResponse(projectFile);
           }
           // Mirror production: public/ contents are served at root
           const publicFile = Bun.file(resolve(activeProjectRoot, "public", `.${path}`));
           if (await publicFile.exists()) {
-            return new Response(publicFile);
+            return fileResponse(publicFile);
           }
         }
 
@@ -302,7 +365,7 @@ export async function createDevServer(options: {
                 minify: false,
               });
               if (result.success && result.outputs.length > 0) {
-                bundleCache.set(cacheKey, await result.outputs[0].text());
+                bundleCache.set(cacheKey, await result.outputs[0]!.text());
               }
             } catch (error) {
               console.error("Bundle failed for", resolved, error);
@@ -312,6 +375,7 @@ export async function createDevServer(options: {
           if (bundled) {
             return new Response(bundled, {
               headers: {
+                ...NO_CACHE,
                 "Content-Type": "application/javascript; charset=utf-8",
               },
             });
@@ -320,17 +384,25 @@ export async function createDevServer(options: {
         return new Response("Not found", { status: 404 });
       }
 
-      if (handleSSE && path.endsWith(".html")) {
+      // Inject the live-reload script into served HTML — but NOT into the Studio editor.
+      // Studio manages its own state (open tabs, undo history, chat) and refreshes edited
+      // Files in-place; a blanket location.reload() would destroy that, e.g. when the AI
+      // Assistant writes a file matching a build glob inside the watched root.
+      if (handleSSE && path.endsWith(".html") && !path.startsWith("/packages/studio/")) {
         const html = await file.text();
         return new Response(injectSSE(html), {
-          headers: { "Content-Type": "text/html; charset=utf-8" },
+          headers: { ...NO_CACHE, "Content-Type": "text/html; charset=utf-8" },
         });
       }
 
-      return new Response(file);
+      return fileResponse(file);
     },
 
     port,
+    // Keep SSE connections alive — heartbeats are every 15 s, and AI streaming can take
+    // 30+ s. The default 10 s idleTimeout kills them prematurely.
+    idleTimeout: 120,
+    websocket: collabRegistry.websocket,
   });
 
   console.log(`\n@jxsuite/server listening on http://localhost:${server.port}`);

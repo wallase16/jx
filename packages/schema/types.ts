@@ -198,6 +198,13 @@ export interface JxElement {
   tagName?: string;
   textContent?: string | null | JxRef;
   innerHTML?: string;
+  /**
+   * Child nodes. A repeater (`{ $prototype: "Array", … }`) may appear as a member of the array —
+   * nestled among siblings or as the sole child — and is structurally a `JxElement` (its
+   * `items`/`map`/`filter`/`sort` are absorbed by the open index signature; narrow with
+   * `isMappedArray`). The bare `| JxMappedArray` form (whole children slot is one repeater) is
+   * retained for backward compatibility with legacy docs.
+   */
   children?: (JxElement | string)[] | JxMappedArray;
   style?: JxStyle;
   attributes?: Record<string, JxAttributeValue>;
@@ -422,6 +429,21 @@ export interface JxClassDef {
   [key: string]: unknown;
 }
 
+/** The adapters the compiler actually implements (site-loader VALID_ADAPTERS + "static"). */
+export type AdapterId = "static" | "cloudflare-pages" | "cloudflare-workers" | "node" | "bun";
+
+/**
+ * Deployment tracking (project.json `build.deploy`): the hosting project this repo publishes to.
+ * Identifiers only — no secrets — so it travels with the repo and any Studio (local or cloud) can
+ * tell whether publishing is set up.
+ */
+export interface DeployConfig {
+  provider: "cloudflare-pages";
+  accountId: string;
+  projectName: string;
+  productionUrl?: string | undefined;
+}
+
 export interface ProjectConfig {
   name?: string;
   url?: string;
@@ -430,7 +452,12 @@ export interface ProjectConfig {
   $elements?: (string | JxElement)[];
   $head?: JxHeadEntry[];
   $defs?: Record<string, unknown>;
-  build?: { adapter?: string; [key: string]: unknown };
+  build?: {
+    adapter?: AdapterId | (string & Record<never, never>);
+    deploy?: DeployConfig;
+    sitemap?: boolean;
+    [key: string]: unknown;
+  };
   images?: ImageConfig;
   imports?: Record<string, string>;
   contentTypes?: Record<string, ContentTypeDef>;
@@ -471,6 +498,12 @@ export interface JxMutableNode {
   tagName?: string;
   textContent?: string | null | JxRef;
   innerHTML?: string;
+  /**
+   * Child nodes. The editor models a mapped-array (repeater) member as a `JxMutableNode` carrying
+   * `$prototype: "Array"` (plus `items`/`map`/`filter`/`sort` below), so members stay assignable
+   * here. The bare `| JxMappedArray` form (whole children slot is one repeater) is retained for
+   * backward compatibility.
+   */
   children?: (JxMutableNode | string)[] | JxMappedArray;
   style?: JxStyle;
   attributes?: Record<string, JxAttributeValue>;

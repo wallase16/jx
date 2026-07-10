@@ -33,7 +33,7 @@ export function setBuildSite(impl: typeof buildSiteImpl) {
   buildSiteImpl = impl;
 }
 
-mock.module("../src/site/site-build.ts", () => ({
+void mock.module("../src/site/site-build.ts", () => ({
   buildSite: (root: string, opts: Record<string, unknown>) => {
     buildSiteCalls.push({ opts, root });
     return buildSiteImpl(root, opts);
@@ -48,7 +48,7 @@ export function setRunCli(impl: typeof runCliImpl) {
   runCliImpl = impl;
 }
 
-mock.module("../src/compiler.ts", () => ({
+void mock.module("../src/compiler.ts", () => ({
   runCli: (src: string, out?: string) => {
     runCliCalls.push({ out, src });
     return runCliImpl(src, out);
@@ -80,7 +80,11 @@ export async function runEntry(entry: "cli" | "compile-cli", args: string[]) {
   let exitCode: number | undefined;
   let exited = false;
   try {
-    await import(`../src/${entry}.ts`);
+    // The entry runs its body in an exported `ready` promise instead of a top-level await, so await
+    // That: Bun's test runtime drops a dynamically-imported module's top-level-await continuation
+    // (it never resumes on Windows), which would leave the entry's effects unexecuted.
+    const mod = (await import(`../src/${entry}.ts`)) as { ready?: Promise<unknown> };
+    await mod.ready;
   } catch (error) {
     if (error instanceof ExitSentinelError) {
       exited = true;

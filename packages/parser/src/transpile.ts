@@ -18,10 +18,10 @@ import remarkParseFrontmatter from "remark-parse-frontmatter";
 import remarkGfm from "remark-gfm";
 import remarkDirective from "remark-directive";
 import { htmlToJx } from "./html-to-jx.ts";
-import type { MdastNode } from "./types.ts";
+import type { MdastNode, UnifiedProcessor } from "./types.ts";
 import type { JsonValue, JxAttributeValue, JxDocument, JxElement } from "@jxsuite/schema/types";
 
-export { htmlToJx };
+export { htmlToJx } from "./html-to-jx.ts";
 
 // ─── Dot-path expansion ─────────────────────────────────────────────────────
 
@@ -30,6 +30,12 @@ export { htmlToJx };
  * DOM/HTML property collision.
  */
 const JX_DOLLAR_KEYS = new Set(["prototype", "ref", "component", "props", "switch", "elements"]);
+
+/**
+ * `$prototype` element types that serialize as a directive named after the prototype (no tagName),
+ * e.g. `:::Array`. On parse the synthetic tagName is dropped and `$prototype` is restored.
+ */
+const PROTOTYPE_DIRECTIVE_NAMES = new Set(["Array"]);
 
 /**
  * Annotation keys written as `--key` in markdown directives, mapped to `$key` in JX JSON. These use
@@ -88,7 +94,7 @@ export function expandDotPaths(attrs: Record<string, string>) {
     const segments = key.split(".");
     let target = result;
     for (let i = 0; i < segments.length - 1; i++) {
-      const seg = jxKey(segments[i]);
+      const seg = jxKey(segments[i]!);
       if (!(seg in target) || typeof target[seg] !== "object") {
         target[seg] = {};
       }
@@ -222,7 +228,7 @@ export function isJxMarkdown(source: string) {
   if (!fmMatch) {
     return false;
   }
-  return /^tagName:\s*.+-.+/m.test(fmMatch[1]);
+  return /^tagName:\s*.+-.+/m.test(fmMatch[1]!);
 }
 
 // ─── Transpiler ─────────────────────────────────────────────────────────────
@@ -472,6 +478,11 @@ export function mdastNodeToJx(node: MdastNode) {
  * @returns {JxElement}
  */
 function directiveToJx(node: MdastNode) {
+  // Prototype directive (e.g. `:::Array`) → `{ $prototype: name, ... }` with no tagName.
+  if (PROTOTYPE_DIRECTIVE_NAMES.has(node.name as string)) {
+    return prototypeDirectiveToJx(node);
+  }
+
   const el: JxElement = { tagName: node.name as string };
 
   if (node.attributes && Object.keys(node.attributes).length > 0) {
@@ -596,6 +607,36 @@ function directiveToJx(node: MdastNode) {
 }
 
 /**
+ * Convert a prototype directive (e.g. `:::Array`) to a tagName-less `$prototype` node. Attributes
+ * (items/filter/sort, dot-path expanded) become element-level props; the single nested child is the
+ * `map` template.
+ *
+ * @param {MdastNode} node
+ * @returns {JxElement}
+ */
+function prototypeDirectiveToJx(node: MdastNode) {
+  const el: JxElement = { $prototype: node.name as string };
+
+  if (node.attributes && Object.keys(node.attributes).length > 0) {
+    const expanded = expandDotPaths(node.attributes);
+    for (const [key, value] of Object.entries(expanded)) {
+      // The prototype is carried by the directive name; ignore any redundant attribute form.
+      if (key === "$prototype") {
+        continue;
+      }
+      el[key] = value as JsonValue;
+    }
+  }
+
+  const children = convertChildren(node.children ?? []);
+  const template = children.find((c) => c != null && typeof c === "object");
+  if (template) {
+    el.map = template as JxElement;
+  }
+  return el;
+}
+
+/**
  * Convert an array of mdast children to Jx elements/strings.
  *
  * @param {MdastNode[]} children
@@ -621,7 +662,7 @@ export function convertChildren(children: MdastNode[]) {
  * @returns {object} Complete Jx JSON document
  */
 export function transpileJxMarkdown(source: string) {
-  const processor = unified()
+  const processor = (unified as unknown as () => UnifiedProcessor)()
     .use(remarkParse)
     .use(remarkFrontmatter, ["yaml"])
     .use(remarkParseFrontmatter)
@@ -640,7 +681,7 @@ export function transpileJxMarkdown(source: string) {
     doc[key] = value;
   }
 
-  const bodyNodes = tree.children.filter(
+  const bodyNodes = tree.children!.filter(
     (n: MdastNode) => n.type !== "yaml" && n.type !== "toml",
   ) as unknown as MdastNode[];
 

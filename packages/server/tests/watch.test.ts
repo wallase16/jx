@@ -78,9 +78,39 @@ describe("createWatcher", () => {
       const { value } = await reader.read();
       const text = new TextDecoder().decode(value);
       expect(text).toContain("data: reload");
-      reader.cancel();
+      void reader.cancel();
     } finally {
       rmSync(FIXTURES, { force: true, recursive: true });
+    }
+  });
+
+  test("emits named fs events for file changes", async () => {
+    const fsFix = join(import.meta.dir, "_fixtures_watch_fs");
+    mkdirSync(fsFix, { recursive: true });
+    const { handleSSE, watcher } = createWatcher(fsFix, [], { debounce: 10 });
+    try {
+      const response = handleSSE();
+      const reader = (response.body as ReadableStream).getReader();
+
+      await new Promise<void>((resolve) => {
+        watcher.on("ready", () => resolve());
+      });
+
+      writeFileSync(join(fsFix, "note.json"), `{"v":${Date.now()}}`);
+
+      const { value } = (await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("timeout")), 3000);
+        }),
+      ])) as ReadableStreamReadResult<Uint8Array>;
+      const text = new TextDecoder().decode(value);
+      expect(text).toContain("event: fs");
+      expect(text).toContain("note.json");
+      void reader.cancel();
+    } finally {
+      await watcher.close();
+      rmSync(fsFix, { force: true, recursive: true });
     }
   });
 
@@ -124,7 +154,7 @@ describe("createWatcher", () => {
       ])) as ReadableStreamReadResult<Uint8Array>;
       const text = new TextDecoder().decode(value);
       expect(text).toContain("data: reload");
-      reader.cancel();
+      void reader.cancel();
     } finally {
       rmSync(FIXTURES, { force: true, recursive: true });
     }

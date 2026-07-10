@@ -69,6 +69,17 @@ function setupFixtures() {
   mkdirSync(join(FIXTURES, "node_modules", "brokenpkg"), { recursive: true });
   writeFileSync(join(FIXTURES, "node_modules", "brokenpkg", "package.json"), "{not json!");
   writeFileSync(join(FIXTURES, "node_modules", "brokenpkg", "sub.js"), "export const s = 3;");
+
+  // Package whose subpath is mapped through package.json "exports" to a real file
+  mkdirSync(join(FIXTURES, "node_modules", "exportspkg", "lib"), { recursive: true });
+  writeFileSync(
+    join(FIXTURES, "node_modules", "exportspkg", "package.json"),
+    JSON.stringify({ exports: { "./sub": "./lib/real.js" }, name: "exportspkg" }),
+  );
+  writeFileSync(
+    join(FIXTURES, "node_modules", "exportspkg", "lib", "real.js"),
+    "export const r = 1;",
+  );
 }
 
 // ─── resolveNpmPath edge cases ───────────────────────────────────────────────
@@ -83,6 +94,11 @@ describe("resolveNpmPath — gaps", () => {
   test("resolves subpath via direct path when exports has no entry", () => {
     const result = resolveNpmPath(FIXTURES, "/directpkg/extra.js");
     expect(result).toBe(join(FIXTURES, "node_modules", "directpkg", "extra.js"));
+  });
+
+  test("resolves subpath through a package.json exports string mapping", () => {
+    const result = resolveNpmPath(FIXTURES, "/exportspkg/sub");
+    expect(result).toBe(join(FIXTURES, "node_modules", "exportspkg", "lib", "real.js"));
   });
 
   test("resolves subpath relative to customElements manifest dir", () => {
@@ -118,7 +134,9 @@ describe("resolveNpmPath — gaps", () => {
 describe("createDevServer", () => {
   test("throws when root is missing", async () => {
     // @ts-expect-error — intentionally invalid options
-    await expect(createDevServer({})).rejects.toThrow("root is required");
+    const promise = createDevServer({});
+    // oxlint-disable-next-line typescript/await-thenable -- Bun's expect().rejects.toThrow() is typed as void but must be awaited at runtime
+    await expect(promise).rejects.toThrow("root is required");
   });
 
   describe("with watch disabled", () => {
@@ -159,6 +177,18 @@ describe("createDevServer", () => {
       const res = await fetch(`${base}/hello.txt`);
       expect(res.status).toBe(200);
       expect(await res.text()).toBe("hello root");
+    });
+
+    test("static responses carry Cache-Control: no-cache (dev must never serve stale bundles)", async () => {
+      // Without this the browser heuristically caches (no validators either) — a plain reload can
+      // Then serve a stale studio.js while the query-cache-busted iframe assets update, leaving a
+      // Half-updated editor.
+      const staticRes = await fetch(`${base}/hello.txt`);
+      expect(staticRes.headers.get("cache-control")).toBe("no-cache");
+      const builtRes = await fetch(`${base}/dist/entry.js`);
+      expect(builtRes.headers.get("cache-control")).toBe("no-cache");
+      const htmlRes = await fetch(`${base}/page.html`);
+      expect(htmlRes.headers.get("cache-control")).toBe("no-cache");
     });
 
     test("serves html without SSE injection when watch is off", async () => {
@@ -233,6 +263,28 @@ describe("createDevServer", () => {
       expect(await res.text()).toBe("project data");
     });
 
+    test("routes /__studio/code/* to handleCodeApi", async () => {
+      const res = await fetch(`${base}/__studio/code/format`, {
+        body: JSON.stringify({ code: "const x=1" }),
+        method: "POST",
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { code: string };
+      expect(typeof body.code).toBe("string");
+    });
+
+    test("routes other /__studio/* paths to handleStudioApi", async () => {
+      const res = await fetch(`${base}/__studio/sites`);
+      expect(res.status).toBe(200);
+      const sites = await res.json();
+      expect(Array.isArray(sites)).toBe(true);
+    });
+
+    test("unknown /__studio/* path falls through to a 404", async () => {
+      const res = await fetch(`${base}/__studio/this-endpoint-does-not-exist`);
+      expect(res.status).toBe(404);
+    });
+
     test("bundles npm bare specifiers on demand and caches them", async () => {
       let res = await fetch(`${base}/tinypkg`);
       expect(res.status).toBe(200);
@@ -300,7 +352,7 @@ describe("createDevServer", () => {
         const reader = (res.body as ReadableStream).getReader();
         const { value } = await reader.read();
         expect(new TextDecoder().decode(value)).toContain("data: reload");
-        reader.cancel();
+        void reader.cancel();
       } finally {
         clearInterval(interval);
         controller.abort();

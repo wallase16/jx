@@ -6,23 +6,23 @@ import type { Tab } from "../src/tabs/tab";
 // ─── Module mocks (must precede the toolbar import) ───────────────────────────
 
 const openQuickSearch = mock(() => {});
-mock.module("../src/panels/quick-search.js", () => ({
+void mock.module("../src/panels/quick-search.js", () => ({
   openQuickSearch,
 }));
 
 const refreshGitStatus = mock(async () => {});
-mock.module("../src/panels/git-panel.js", () => ({
+void mock.module("../src/panels/git-panel.js", () => ({
   refreshGitStatus,
 }));
 
 const openBrowseModal = mock(() => {});
-mock.module("../src/browse/browse-modal.js", () => ({
+void mock.module("../src/browse/browse-modal.js", () => ({
   openBrowseModal,
 }));
 
 let newProjectResult: { root: string } | null = null;
 const openNewProjectModal = mock(async () => newProjectResult);
-mock.module("../src/new-project/new-project-modal.js", () => ({
+void mock.module("../src/new-project/new-project-modal.js", () => ({
   openNewProjectModal,
 }));
 
@@ -38,15 +38,8 @@ function makeCtx(overrides: Partial<ToolbarCtx> = {}): ToolbarCtx {
   return {
     closeFunctionEditor: mock(() => {}),
     getCanvasMode: mock(() => "edit"),
-    navigateBack: mock(() => {}),
-    navigateToLevel: mock((_level: number) => {}),
     openProject: mock(() => {}),
     openRecentProject: mock(async (_root: string) => {}),
-    parseMediaEntries: mock(() => ({
-      baseWidth: 1200,
-      featureQueries: [] as { name: string; query: string }[],
-      sizeBreakpoints: [],
-    })),
     renderCanvas: mock(() => {}),
     safeRenderRightPanel: mock(() => {}),
     saveFile: mock(() => {}),
@@ -119,9 +112,11 @@ describe("minimal toolbar (no open tab)", () => {
     expect(btn(root, "Save").hasAttribute("disabled")).toBe(true);
     expect(btn(root, "Undo").hasAttribute("disabled")).toBe(true);
     expect(btn(root, "Redo").hasAttribute("disabled")).toBe(true);
-    for (const label of ["Edit", "Design", "Preview", "Code", "Stylebook"]) {
+    for (const label of ["Edit", "Design", "Code", "Stylebook"]) {
       expect(btn(root, label).hasAttribute("disabled")).toBe(true);
     }
+    // Preview is a tab-bar toggle now, not a switchable mode.
+    expect(root.textContent).not.toContain("Preview");
     expect(btn(root, "Design").hasAttribute("selected")).toBe(true);
     expect(btn(root, "Edit").hasAttribute("selected")).toBe(false);
   });
@@ -161,12 +156,55 @@ describe("minimal toolbar (no open tab)", () => {
     await flush();
 
     const items = [...root.querySelectorAll("sp-menu-item")];
-    expect(items.map((i) => i.textContent?.trim())).toEqual(["New Project…", "Proj A", "Proj B"]);
+    expect(items.map((i) => i.textContent?.trim())).toEqual([
+      "New Project…",
+      "Proj A",
+      "Proj B",
+      "Clear recent projects",
+    ]);
 
     const menu = root.querySelector("sp-menu") as HTMLElement & { value: string };
     menu.value = "/b";
     menu.dispatchEvent(new Event("change", { bubbles: true }));
     expect(ctx.openRecentProject).toHaveBeenCalledWith("/b");
+  });
+
+  test("a recent project's remove button drops just that entry", async () => {
+    localStorage.setItem(
+      "jx-studio-recent-projects",
+      JSON.stringify([
+        { name: "Proj A", root: "/a", timestamp: 2 },
+        { name: "Proj B", root: "/b", timestamp: 1 },
+      ]),
+    );
+    const ctx = makeCtx();
+    toolbar.mount(root, ctx);
+    await flush();
+
+    const removeBtns = [...root.querySelectorAll("sp-action-button[title='Remove from recent']")];
+    expect(removeBtns).toHaveLength(2);
+    click(removeBtns[0]!); // Proj A is newest-first
+    await flush();
+    expect(ctx.openRecentProject).not.toHaveBeenCalled();
+    const names = [...root.querySelectorAll("sp-menu-item")].map((i) => i.textContent?.trim());
+    expect(names).toEqual(["New Project…", "Proj B", "Clear recent projects"]);
+  });
+
+  test("Clear recent projects empties the list", async () => {
+    localStorage.setItem(
+      "jx-studio-recent-projects",
+      JSON.stringify([{ name: "Proj A", root: "/a", timestamp: 1 }]),
+    );
+    toolbar.mount(root, makeCtx());
+    await flush();
+
+    const menu = root.querySelector("sp-menu") as HTMLElement & { value: string };
+    menu.value = "__clear__";
+    menu.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+    const items = [...root.querySelectorAll("sp-menu-item")];
+    expect(items).toHaveLength(1);
+    expect(items[0]!.textContent?.trim()).toBe("New Project…");
   });
 
   test("menu without stored projects only offers New Project", async () => {
@@ -290,75 +328,6 @@ describe("full toolbar (active tab)", () => {
     expect(tab.doc.document).toEqual({ children: [], tagName: "div" });
   });
 
-  test("breadcrumb appears with a document stack and navigates", async () => {
-    const tab = openTestTab();
-    const ctx = makeCtx();
-    toolbar.mount(root, ctx);
-    await flush();
-    expect(root.querySelector(".breadcrumb")).toBeNull();
-
-    tab.session.documentStack.push({ documentPath: "/project/parent.json" } as any);
-    await flush();
-
-    const crumb = root.querySelector(".breadcrumb")!;
-    const clickable = crumb.querySelector(".breadcrumb-item.clickable")!;
-    expect(clickable.textContent).toBe("parent.json");
-    expect(crumb.querySelector(".breadcrumb-item.current")?.textContent).toContain("index.json");
-
-    click(btn(root, "Back"));
-    expect(ctx.navigateBack).toHaveBeenCalledTimes(1);
-
-    click(clickable);
-    expect(ctx.navigateToLevel).toHaveBeenCalledWith(0);
-  });
-
-  test("breadcrumb falls back to 'untitled' for frames without a path", async () => {
-    const tab = openTestTab();
-    toolbar.mount(root, makeCtx());
-    tab.session.documentStack.push({} as any);
-    await flush();
-    expect(root.querySelector(".breadcrumb-item.clickable")?.textContent).toBe("untitled");
-  });
-
-  test("feature toggles render from media queries and flip session toggles", async () => {
-    const tab = openTestTab();
-    const ctx = makeCtx({
-      parseMediaEntries: mock(() => ({
-        baseWidth: 1200,
-        featureQueries: [{ name: "--dark-mode", query: "(prefers-color-scheme: dark)" }],
-        sizeBreakpoints: [],
-      })),
-    });
-    toolbar.mount(root, ctx);
-    await flush();
-
-    const toggle = root.querySelector(
-      "sp-action-button[title='(prefers-color-scheme: dark)']",
-    ) as HTMLElement;
-    expect(toggle.textContent).toContain("Dark Mode");
-    expect(toggle.hasAttribute("selected")).toBe(false);
-
-    click(toggle);
-    await flush();
-    expect(tab.session.ui.featureToggles["--dark-mode"]).toBe(true);
-    expect(
-      root
-        .querySelector("sp-action-button[title='(prefers-color-scheme: dark)']")
-        ?.hasAttribute("selected"),
-    ).toBe(true);
-
-    click(root.querySelector("sp-action-button[title='(prefers-color-scheme: dark)']")!);
-    await flush();
-    expect(tab.session.ui.featureToggles["--dark-mode"]).toBe(false);
-  });
-
-  test("no toggle group when the document has no feature queries", async () => {
-    openTestTab();
-    toolbar.mount(root, makeCtx());
-    await flush();
-    expect(root.querySelector("sp-action-button[toggles]")).toBeNull();
-  });
-
   test("mode switcher selects the current canvas mode and switches modes", async () => {
     const tab = openTestTab();
     const ctx = makeCtx();
@@ -377,6 +346,18 @@ describe("full toolbar (active tab)", () => {
     expect(view.panX).toBe(0);
     expect(view.panY).toBe(0);
     expect(tab.session.ui.editingFunction).toBeNull();
+  });
+
+  test("switcher has no Preview button and keeps the base mode highlighted while previewing", async () => {
+    const tab = openTestTab();
+    toolbar.mount(root, makeCtx());
+    tab.session.ui.canvasMode = "design";
+    tab.session.ui.preview = true;
+    await flush();
+
+    expect(root.textContent).not.toContain("Preview");
+    expect(btn(root, "Design").hasAttribute("selected")).toBe(true);
+    expect(btn(root, "Edit").hasAttribute("selected")).toBe(false);
   });
 
   test("clicking the current mode is a no-op", async () => {
@@ -500,7 +481,7 @@ describe("full toolbar (active tab)", () => {
     expect(group.classList.contains("mac")).toBe(false);
     const buttons = [...group.querySelectorAll("sp-action-button")];
     expect(buttons.map((b) => b.getAttribute("title"))).toEqual(["Minimize", "Maximize", "Close"]);
-    click(buttons[2]);
+    click(buttons[2]!);
     expect(controls.close).toHaveBeenCalledTimes(1);
     // Non-mac CSD renders at the end of the toolbar.
     expect(root.lastElementChild?.classList.contains("window-controls")).toBe(true);
@@ -535,7 +516,7 @@ describe("full toolbar (active tab)", () => {
         "Minimize",
         "Maximize",
       ]);
-      click(buttons[1]);
+      click(buttons[1]!);
       expect(controls.minimize).toHaveBeenCalledTimes(1);
       expect(root.firstElementChild?.nextElementSibling).not.toBeNull();
     } finally {
@@ -571,18 +552,17 @@ describe("lifecycle", () => {
   });
 
   test("template errors are caught and logged, not thrown", async () => {
-    openTestTab();
+    const tab = openTestTab();
+    // Poison the tab capabilities (read only inside the template, not the mount effect) so the
+    // AllowedModes read throws during render.
+    (tab as unknown as { capabilities: unknown }).capabilities = null;
     const errors: unknown[][] = [];
     const originalError = console.error;
     console.error = (...args: unknown[]) => {
       errors.push(args);
     };
     try {
-      const ctx = makeCtx({
-        getCanvasMode: mock(() => {
-          throw new Error("boom");
-        }),
-      });
+      const ctx = makeCtx();
       expect(() => {
         toolbar.mount(root, ctx);
       }).not.toThrow();

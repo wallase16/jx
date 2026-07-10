@@ -1,8 +1,10 @@
 // oxlint-disable unicorn/no-process-exit -- standalone launcher CLI; exit codes are its interface
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import {
   codeService,
+  createProject,
   discoverComponents,
   fetchPluginSchema,
   formatAction,
@@ -14,10 +16,13 @@ import {
   handleResolveSiteContext,
   handleUploadFile,
   handleWriteFile,
+  jxResolve,
+  jxServerFunction,
   listDirectory,
   listFormats,
   locateFile,
   openProject,
+  setDirectoryDialog,
   setFileDialog,
   setProjectRoot,
 } from "../handlers";
@@ -38,21 +43,35 @@ import {
   gitStatus,
   gitUnstage,
 } from "../git";
-import { addPackage, listPackages, removePackage } from "../packages";
-import { openFileDialog } from "./utils";
-import { handleAiRoute } from "../ai";
+import {
+  addPackage,
+  dependenciesNeedInstall,
+  installDependencies,
+  listPackages,
+  outdatedPackages,
+  removePackage,
+  setPackageVersions,
+} from "../packages";
+import { openDirectoryDialog, openFileDialog } from "./utils";
+import { createProjectServer } from "@jxsuite/server/project-server";
+import { listStarters } from "@jxsuite/starters";
+import { readRecents, writeRecents } from "../recent-store";
+import { readSettings, writeSettings } from "../settings-store";
+import type { RecentProjectEntry } from "../rpc-schema";
 
 // ─── Project root ────────────────────────────────────────────────────────────
 
 const projectRoot = process.argv[2] || process.env.JSONSX_PROJECT_ROOT || process.cwd();
 setProjectRoot(projectRoot);
 setFileDialog(openFileDialog);
+setDirectoryDialog(openDirectoryDialog);
 
 // ─── RPC handler dispatch map ────────────────────────────────────────────────
 
 const handlers: Record<string, (params: unknown) => Promise<unknown>> = {
   addPackage: (params) => addPackage(params as { name: string }),
   codeService: (params) => codeService(params),
+  dependenciesNeedInstall: () => dependenciesNeedInstall(),
   createDirectory: (params) => handleCreateDirectory(params as { path: string }),
   deleteFile: (params) => handleDeleteFile(params as { path: string }),
   discoverComponents: (params) => discoverComponents(params as { dir?: string }),
@@ -85,9 +104,51 @@ const handlers: Record<string, (params: unknown) => Promise<unknown>> = {
   gitUnstage: (params) => gitUnstage(params as { files: string[] }),
   listDirectory: (params) => listDirectory(params as { dir: string }),
   listFormats: () => listFormats(),
+  installDependencies: () => installDependencies(),
   listPackages: () => listPackages(),
   locateFile: (params) => locateFile(params as { name: string }),
+  outdatedPackages: () => outdatedPackages(),
+  setPackageVersions: (params) =>
+    setPackageVersions(params as { updates: { name: string; version: string; dev?: boolean }[] }),
   openProject: () => openProject(),
+  createProject: (params) =>
+    createProject(
+      params as {
+        name: string;
+        description?: string;
+        url?: string;
+        adapter?: string;
+        directory: string;
+        starter?: string;
+        template?: string;
+        design?: {
+          accent?: string;
+          background?: string;
+          text?: string;
+          bodyFont?: string;
+          headingFont?: string;
+          media?: Record<string, string>;
+          logo?: { name: string; base64: string };
+        };
+      },
+    ),
+  listStarters: () => Promise.resolve(listStarters()),
+  pickDirectory: async () => ({ path: await openDirectoryDialog() }),
+  getProjectRoot: () => Promise.resolve({ root: getProjectRoot() }),
+  setWindowProject: (params) => {
+    // Single-window launcher: rebind the process-global root in place. Studio re-reads the
+    // Project.json itself, so no config is returned and dedup never applies.
+    setProjectRoot((params as { root: string }).root);
+    return Promise.resolve({ config: null, deduped: false });
+  },
+  getRecentProjects: () => readRecents(),
+  saveRecentProjects: (params) =>
+    writeRecents((params as { projects: RecentProjectEntry[] }).projects),
+  getSettings: () => readSettings(),
+  saveSettings: (params) =>
+    writeSettings((params as { settings: Record<string, string> }).settings),
+  jxResolve: (params) => jxResolve(params as { body: string }),
+  jxServerFunction: (params) => jxServerFunction(params as { body: string }),
   readFile: (params) => handleReadFile(params as { path: string }),
   removePackage: (params) => removePackage(params as { name: string }),
   renameFile: (params) => handleRenameFile(params as { from: string; to: string }),
@@ -100,100 +161,17 @@ const handlers: Record<string, (params: unknown) => Promise<unknown>> = {
 
 const studioDir = process.env.JX_STUDIO_ASSETS || resolve(import.meta.dir, "../../assets/studio");
 
-const server = Bun.serve({
-  async fetch(req, srv) {
-    if (srv.upgrade(req)) {
-      return;
-    }
-
-    const url = new URL(req.url);
-    const path = url.pathname.replace(/^\/{2,}/, "/");
-
-    // AI routes (SSE streaming + REST)
-    if (path.startsWith("/studio/ai/")) {
-      const aiResponse = await handleAiRoute(req, path, projectRoot);
-      if (aiResponse) {
-        return aiResponse;
-      }
-    }
-
-    if (path.startsWith("/studio/")) {
-      const assetPath = resolve(studioDir, `.${path.replace("/studio/", "/")}`);
-      const file = Bun.file(assetPath);
-      if (await file.exists()) {
-        return new Response(file);
-      }
-    }
-
-    const root = getProjectRoot();
-    if (root) {
-      // Serve absolute paths that fall under the project root
-      if (path.startsWith(root)) {
-        const file = Bun.file(path);
-        if (await file.exists()) {
-          return new Response(file);
-        }
-      }
-
-      // Serve relative paths from project root
-      const projectFile = Bun.file(resolve(root, `.${path}`));
-      if (await projectFile.exists()) {
-        return new Response(projectFile);
-      }
-
-      // Serve from public/ subdirectory
-      const publicFile = Bun.file(resolve(root, "public", `.${path}`));
-      if (await publicFile.exists()) {
-        return new Response(publicFile);
-      }
-    }
-
-    return new Response("Not Found", { status: 404 });
+// Single-window chromium launcher: one default session whose root tracks the process-global root.
+// The factory re-resolves this on every request/message, so setWindowProject takes effect live.
+const defaultSession = {
+  get projectRoot(): string | null {
+    return getProjectRoot();
   },
-  port: 0,
-  websocket: {
-    async message(ws, raw) {
-      let msg: { id: number; method: string; params?: unknown };
-      try {
-        msg = JSON.parse(raw as string);
-      } catch {
-        ws.send(JSON.stringify({ error: "Invalid JSON", id: 0 }));
-        return;
-      }
+  handlers,
+};
 
-      const handler = handlers[msg.method];
-      if (!handler) {
-        ws.send(
-          JSON.stringify({
-            error: `Unknown method: ${msg.method}`,
-            id: msg.id,
-          }),
-        );
-        return;
-      }
-
-      try {
-        const result = await handler(msg.params);
-        ws.send(JSON.stringify({ id: msg.id, result: result ?? null }));
-      } catch (error: unknown) {
-        ws.send(
-          JSON.stringify({
-            error: error instanceof Error ? error.message : String(error),
-            id: msg.id,
-          }),
-        );
-      }
-    },
-  },
-});
-
-const serverUrl = `http://localhost:${server.port}`;
-console.log(`[chromium] Studio server at ${serverUrl}`);
-console.log(`[chromium] WebSocket RPC at ws://localhost:${server.port}`);
-console.log(`[chromium] Project root: ${projectRoot}`);
-
-// ─── Launch Chromium ─────────────────────────────────────────────────────────
-
+// The launcher's Chromium binary doubles as puppeteer's browser for the import pipeline, so it is
+// Discovered before the server starts (NixOS-safe: no google-chrome-stable assumption).
 function findChromium(): string | null {
   const candidates = [
     process.env.CHROMIUM_BIN,
@@ -203,13 +181,13 @@ function findChromium(): string | null {
     "google-chrome-stable",
   ].filter(Boolean) as string[];
 
+  // Bun.which resolves a binary in PATH on every platform (no dependency on a POSIX `which`, which
+  // Is absent from a stock Windows shell and made resolution flaky depending on the host shell).
   for (const bin of candidates) {
-    try {
-      const result = Bun.spawnSync(["which", bin]);
-      if (result.exitCode === 0) {
-        return result.stdout.toString().trim();
-      }
-    } catch {}
+    const found = Bun.which(bin);
+    if (found) {
+      return found;
+    }
   }
   return null;
 }
@@ -220,14 +198,71 @@ if (!chromiumBin) {
   process.exit(1);
 }
 
+const { url: serverUrl, rpcToken } = createProjectServer({
+  importApi: {
+    chromePath: chromiumBin,
+    resolveDest: (dir) => {
+      // The webview resolves the destination under a natively-picked parent before posting.
+      if (!isAbsolute(dir)) {
+        throw new Error("directory must be an absolute path");
+      }
+      return dir;
+    },
+  },
+  resolveSession: () => defaultSession,
+  studioDir,
+});
+
+console.log(`[chromium] Studio server at ${serverUrl}`);
+console.log(`[chromium] WebSocket RPC at ${serverUrl.replace(/^http/, "ws")}`);
+console.log(`[chromium] Project root: ${projectRoot}`);
+
+// ─── Launch Chromium ─────────────────────────────────────────────────────────
+
+/**
+ * Seed the profile's Preferences so Chromium never offers to save credentials: the credentials
+ * form's API-key field is a password input, and without these prefs Chromium offers to save it to
+ * the OS password manager on every save. Chrome only honors these as profile preferences (there is
+ * no flag), so they are merged into `<user-data-dir>/Default/Preferences` before every launch —
+ * preserving whatever else Chromium has written there. A missing or corrupt file is replaced with a
+ * fresh object holding just these keys.
+ */
+export function seedChromiumPreferences(userDataDir: string): void {
+  const defaultDir = resolve(userDataDir, "Default");
+  const prefsFile = resolve(defaultDir, "Preferences");
+  let prefs: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(readFileSync(prefsFile, "utf8")) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      prefs = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Missing or corrupt Preferences: start from a fresh object.
+  }
+  prefs.credentials_enable_service = false;
+  const profile =
+    prefs.profile && typeof prefs.profile === "object" && !Array.isArray(prefs.profile)
+      ? (prefs.profile as Record<string, unknown>)
+      : {};
+  profile.password_manager_enabled = false;
+  profile.password_manager_leak_detection = false;
+  prefs.profile = profile;
+  mkdirSync(defaultDir, { recursive: true });
+  writeFileSync(prefsFile, JSON.stringify(prefs), "utf8");
+}
+
 console.log(`[chromium] Launching: ${chromiumBin}`);
 
+const userDataDir = resolve(projectRoot, ".jx/chromium-profile");
+seedChromiumPreferences(userDataDir);
+
 const chromiumArgs = [
-  `--app=${serverUrl}/studio/index.html`,
+  `--app=${serverUrl}/__studio__/index.html?token=${rpcToken}`,
+  "--class=jx-studio",
   "--no-first-run",
   "--no-default-browser-check",
   "--window-size=1400,900",
-  `--user-data-dir=${resolve(projectRoot, ".jx/chromium-profile")}`,
+  `--user-data-dir=${userDataDir}`,
 ];
 
 if (process.env.WAYLAND_DISPLAY) {

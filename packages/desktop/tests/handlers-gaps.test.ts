@@ -1,11 +1,12 @@
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+// oxlint-disable typescript/await-thenable -- bun test .resolves/.rejects matchers are typed `void` but return real Promises at runtime; the await is required.
+import { beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ComponentMeta } from "../src/rpc-schema";
 import type { StudioSchema } from "../src/handlers";
 
-mock.module("electrobun/bun", () => ({
+void mock.module("electrobun/bun", () => ({
   BrowserWindow: class {},
   Electrobun: { start: () => {} },
   Utils: { openFileDialog: async () => [] },
@@ -34,7 +35,7 @@ const fakeRegistry = {
 
 const mockBuildRegistry = mock(async (_root: string, _config: unknown) => fakeRegistry);
 
-mock.module("@jxsuite/compiler/format-host", () => ({
+void mock.module("@jxsuite/compiler/format-host", () => ({
   buildProjectFormatRegistry: mockBuildRegistry,
 }));
 
@@ -48,7 +49,7 @@ const mockHandleServerFunction = mock(
   async (_req: Request, _root: string) => new Response('{"error":"boom"}', { status: 500 }),
 );
 
-mock.module("@jxsuite/server/resolve", () => ({
+void mock.module("@jxsuite/server/resolve", () => ({
   handleResolve: mockHandleResolve,
   handleServerFunction: mockHandleServerFunction,
 }));
@@ -144,10 +145,19 @@ describe("listFormats", () => {
     }
   });
 
-  test("returns [] when no project is open", async () => {
+  test("returns [] quietly (no registry build, no error log) when no project is open", async () => {
     setProjectRoot(null);
-    const formats = await listFormats();
-    expect(formats).toEqual([]);
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const formats = await listFormats();
+      expect(formats).toEqual([]);
+      // The welcome-screen path short-circuits before getFormatRegistry, so it neither builds a
+      // Registry nor logs the misleading "No project open" error that used to spam the terminal.
+      expect(mockBuildRegistry).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   test("returns [] when the registry builder throws", async () => {
@@ -278,7 +288,7 @@ describe("jxResolve", () => {
       expect(result).toEqual({ body: '{"resolved":true}', status: 200 });
       const [req, root, third] = mockHandleResolve.mock.calls[0]!;
       expect(root).toBe(FIXTURES);
-      expect(third).toBeNull();
+      expect(third).toBe(FIXTURES);
       expect(req.method).toBe("POST");
       expect(new URL(req.url).pathname).toBe("/__jx_resolve__");
       expect(await req.text()).toBe('{"$prototype":"ContentCollection"}');

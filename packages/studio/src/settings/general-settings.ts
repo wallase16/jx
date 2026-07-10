@@ -31,7 +31,7 @@ export function renderGeneralSettings(container: HTMLElement) {
   };
 
   const onAdapterChange = (e: Event) => {
-    updateSiteConfig({
+    void updateSiteConfig({
       build: { ...config.build, adapter: (e.target as HTMLInputElement).value },
     });
   };
@@ -40,7 +40,7 @@ export function renderGeneralSettings(container: HTMLElement) {
     // Lazy import breaks the general-settings ↔ settings-modal module cycle
     const { closeSettingsModal } = await import("./settings-modal");
     closeSettingsModal();
-    openFileInTab("project.json");
+    void openFileInTab("project.json");
   };
 
   // ─── Breakpoints ($media) ───────────────────────────────────────────────────
@@ -50,7 +50,7 @@ export function renderGeneralSettings(container: HTMLElement) {
 
   const onMediaValueChange = (key: string) => (e: Event) => {
     const updated = { ...media, [key]: (e.target as HTMLInputElement).value };
-    updateSiteConfig({ $media: updated });
+    void updateSiteConfig({ $media: updated });
   };
 
   const onMediaNameChange = (oldKey: string) => (e: Event) => {
@@ -63,20 +63,20 @@ export function renderGeneralSettings(container: HTMLElement) {
     for (const [k, v] of Object.entries(media)) {
       updated[k === oldKey ? newKey : k] = v;
     }
-    updateSiteConfig({ $media: updated });
+    void updateSiteConfig({ $media: updated });
     renderGeneralSettings(container);
   };
 
   const onRemoveBreakpoint = (key: string) => () => {
     const updated = { ...media };
     delete updated[key];
-    updateSiteConfig({ $media: updated });
+    void updateSiteConfig({ $media: updated });
     renderGeneralSettings(container);
   };
 
   const onAddBreakpoint = () => {
     const updated = { ...media, "--new": "(max-width: 480px)" };
-    updateSiteConfig({ $media: updated });
+    void updateSiteConfig({ $media: updated });
     renderGeneralSettings(container);
   };
 
@@ -94,16 +94,18 @@ export function renderGeneralSettings(container: HTMLElement) {
             ? html`<img
                 src=${currentFavicon}
                 alt="Current favicon"
-                style="width:32px;height:32px;object-fit:contain;border:1px solid var(--border);border-radius:4px;padding:2px"
+                style="width:32px;height:32px;object-fit:contain;border:1px solid var(--border);border-radius:var(--radius);padding:2px"
               />`
             : html`<div
-                style="width:32px;height:32px;border:1px dashed var(--border);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--fg-dim);font-size:11px"
+                style="width:32px;height:32px;border:1px dashed var(--border);border-radius:var(--radius);display:flex;align-items:center;justify-content:center;color:var(--fg-dim);font-size:var(--spectrum-font-size-50, 11px)"
               >
                 —
               </div>`}
           <sp-action-button size="s" @click=${onFaviconUpload}> Upload Favicon </sp-action-button>
           ${currentFavicon
-            ? html`<span style="font-size:11px;color:var(--fg-dim)">${currentFavicon}</span>`
+            ? html`<span style="font-size:var(--spectrum-font-size-50, 11px);color:var(--fg-dim)"
+                >${currentFavicon}</span
+              >`
             : nothing}
         </div>
       </div>

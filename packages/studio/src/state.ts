@@ -74,6 +74,35 @@ export function getNodeAtPath(doc: JxMutableNode, path: JxPath) {
 }
 
 /**
+ * Shallow-clone every node along `path` from root to target, leaving non-path subtrees as shared
+ * references. Returns the new root and the mutable target node at the end of the path.
+ *
+ * Used by mutation functions for structural-sharing history: the old root becomes an immutable
+ * snapshot (shared subtrees are never mutated), and the new root is the live document.
+ */
+export function cloneAlongPath(
+  doc: JxMutableNode,
+  path: JxPath,
+): { root: JxMutableNode; target: JxMutableNode } {
+  const root = Array.isArray(doc) ? [...doc] : { ...doc };
+  let node: Record<string | number, unknown> = root as Record<string | number, unknown>;
+
+  for (const key of path) {
+    const child = node[key];
+    if (child == null) {
+      return { root: root as JxMutableNode, target: node as JxMutableNode };
+    }
+    const cloned = Array.isArray(child)
+      ? [...(child as unknown[])]
+      : { ...(child as Record<string, unknown>) };
+    node[key] = cloned;
+    node = cloned as Record<string | number, unknown>;
+  }
+
+  return { root: root as JxMutableNode, target: node as JxMutableNode };
+}
+
+/**
  * The node's children when they are a static array (the edit-mode invariant); an empty array for
  * mapped-array or absent children.
  *
@@ -82,6 +111,52 @@ export function getNodeAtPath(doc: JxMutableNode, path: JxPath) {
  */
 export function childList(node: JxMutableNode | null | undefined): (JxMutableNode | string)[] {
   return Array.isArray(node?.children) ? node.children : [];
+}
+
+/**
+ * Normalize a document in place to the canonical array-member form: a legacy whole-children
+ * repeater (`children: { $prototype: "Array", … }`) becomes a single member of a children array
+ * (`children: [{ $prototype: "Array", … }]`). Recurses through children, repeater templates, and
+ * `$switch` cases. Runs once when a document is loaded into a tab so every in-studio doc — and its
+ * history checkpoints — uses the member form before any mutation.
+ *
+ * @param {unknown} node
+ * @returns {unknown} The same node (mutated)
+ */
+export function normalizeArrayChildren(node: unknown): unknown {
+  if (!node || typeof node !== "object") {
+    return node;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      normalizeArrayChildren(child);
+    }
+    return node;
+  }
+  const n = node as JxMutableNode;
+  const { children } = n;
+  if (
+    children &&
+    typeof children === "object" &&
+    !Array.isArray(children) &&
+    (children as JxMutableNode).$prototype === "Array"
+  ) {
+    n.children = [children as JxMutableNode];
+  }
+  if (Array.isArray(n.children)) {
+    for (const child of n.children) {
+      normalizeArrayChildren(child);
+    }
+  }
+  if (n.$prototype === "Array" && n.map && typeof n.map === "object") {
+    normalizeArrayChildren(n.map);
+  }
+  if (n.cases && typeof n.cases === "object") {
+    for (const caseDef of Object.values(n.cases)) {
+      normalizeArrayChildren(caseDef);
+    }
+  }
+  return node;
 }
 
 /**
@@ -180,6 +255,19 @@ export function flattenTree(
     return [{ depth, node: doc, nodeType: "text", path }];
   }
 
+  // Array pseudo-element (repeater): a first-class node at its own path. Emit the "map" row, then
+  // Recurse into its single template at `[...path, "map"]`. This is reached both when the array is
+  // A member of a children array (path `[…, "children", i]`) and the legacy whole-children form
+  // (path `[…, "children"]`).
+  if ((doc as JxMutableNode).$prototype === "Array") {
+    const rows: FlatRow[] = [{ depth, node: doc, nodeType: "map", path }];
+    const mapDef = (doc as JxMutableNode).map;
+    if (mapDef && typeof mapDef === "object") {
+      rows.push(...flattenTree(mapDef as JxMutableNode, [...path, "map"], depth + 1));
+    }
+    return rows;
+  }
+
   const rows: FlatRow[] = [{ depth, node: doc, nodeType: "element", path }];
 
   // Custom component instances without user-authored children are atomic in the layer tree
@@ -192,24 +280,15 @@ export function flattenTree(
   if (Array.isArray(children)) {
     for (let i = 0; i < children.length; i++) {
       const childPath = [...path, "children", i];
-      rows.push(...flattenTree(children[i], childPath, depth + 1));
+      rows.push(...flattenTree(children[i]!, childPath, depth + 1));
     }
   } else if (
     children &&
     typeof children === "object" &&
     (children as JxMutableNode).$prototype === "Array"
   ) {
-    // $map — emit the map container, then recurse into the template
-    rows.push({
-      depth: depth + 1,
-      node: children as JxMutableNode,
-      nodeType: "map",
-      path: [...path, "children"],
-    });
-    const mapDef = (children as JxMutableNode).map;
-    if (mapDef && typeof mapDef === "object") {
-      rows.push(...flattenTree(mapDef as JxMutableNode, [...path, "children", "map"], depth + 2));
-    }
+    // Legacy whole-children repeater: the array occupies the children slot itself.
+    rows.push(...flattenTree(children as JxMutableNode, [...path, "children"], depth + 1));
   }
 
   // $switch — emit each case as a virtual child
@@ -261,6 +340,10 @@ export function nodeLabel(node: JxMutableNode | null) {
   }
   if (node.$id) {
     return node.$id;
+  }
+  if (node.tagName === "slot") {
+    const name = node.attributes?.name;
+    return typeof name === "string" && name.trim() ? `slot: ${name.trim()}` : "slot";
   }
   const tag = node.tagName ?? "div";
   const suffix = node.$switch ? " ⇆" : "";

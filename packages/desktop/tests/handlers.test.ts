@@ -1,10 +1,11 @@
+// oxlint-disable typescript/await-thenable -- bun test .resolves/.rejects matchers are typed `void` but return real Promises at runtime; the await is required.
 import { describe, expect, mock, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ComponentMeta, DirEntry } from "../src/rpc-schema";
 import type { StudioSchema } from "../src/handlers";
 
-mock.module("electrobun/bun", () => ({
+void mock.module("electrobun/bun", () => ({
   BrowserWindow: class {},
   Electrobun: { start: () => {} },
   Utils: { openFileDialog: async () => [] },
@@ -14,9 +15,9 @@ const {
   setProjectRoot,
   getProjectRoot,
   setFileDialog,
+  setDirectoryDialog,
   listDirectory,
   handleReadFile,
-  handleReadFileAsDataUrl,
   handleWriteFile,
   handleDeleteFile,
   handleRenameFile,
@@ -28,6 +29,7 @@ const {
   locateFile,
   fetchPluginSchema,
   openProject,
+  createProject,
 } = await import("../src/handlers");
 
 const FIXTURES = join(import.meta.dir, "_fixtures_handlers");
@@ -72,6 +74,31 @@ describe("guards", () => {
       cleanup();
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "write-path realpath check blocks a symlinked dir that escapes the root",
+    async () => {
+      setup();
+      const { mkdirSync: mkdir, symlinkSync, rmSync: rmTree } = await import("node:fs");
+      const outside = join(import.meta.dir, "_fixtures_handlers_outside");
+      rmTree(outside, { force: true, recursive: true });
+      mkdir(outside, { recursive: true });
+      try {
+        // A symlink INSIDE the project that points to a directory OUTSIDE it. The lexical guard
+        // Alone ("evil/x.txt" has no "..") would pass; the realpath re-check must catch it.
+        symlinkSync(outside, join(FIXTURES, "evil"));
+        await expect(handleWriteFile({ content: "x", path: "evil/x.txt" })).rejects.toThrow(
+          "Path outside project root",
+        );
+        await expect(handleDeleteFile({ path: "evil/x.txt" })).rejects.toThrow(
+          "Path outside project root",
+        );
+      } finally {
+        rmTree(outside, { force: true, recursive: true });
+        cleanup();
+      }
+    },
+  );
 });
 
 // ─── listDirectory ──────────────────────────────────────────────────────────
@@ -132,6 +159,23 @@ describe("listDirectory", () => {
     setup();
     try {
       await expect(listDirectory({ dir: "../../" })).rejects.toThrow("Path outside project root");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("returns forward-slash relative paths for nested entries", async () => {
+    setup();
+    try {
+      mkdirSync(join(FIXTURES, "content", "products"), { recursive: true });
+      writeFileSync(join(FIXTURES, "content", "products", "widget.md"), "---\n---\n");
+
+      const entries = await listDirectory({ dir: "content/products" });
+      const file = entries.find((e: DirEntry) => e.name === "widget.md")!;
+      // On Windows Node's relative() yields backslash paths.
+      // Studio code such as findContentTypeSchema expects forward slashes, so the handler normalizes.
+      expect(file.path).toBe("content/products/widget.md");
+      expect(file.path).not.toContain("\\");
     } finally {
       cleanup();
     }
@@ -232,6 +276,36 @@ describe("handleRenameFile", () => {
       cleanup();
     }
   });
+
+  test("rewrites project references and reports them (refactor)", async () => {
+    setup();
+    try {
+      mkdirSync(join(FIXTURES, "pages"), { recursive: true });
+      mkdirSync(join(FIXTURES, "components"), { recursive: true });
+      writeFileSync(
+        join(FIXTURES, "pages/index.json"),
+        JSON.stringify({ children: [{ $ref: "../components/counter.json" }] }),
+      );
+      writeFileSync(
+        join(FIXTURES, "components/counter.json"),
+        JSON.stringify({ children: [], tagName: "my-counter" }),
+      );
+
+      const report = await handleRenameFile({
+        from: "components/counter.json",
+        to: "components/my-button.json",
+      });
+
+      const index = JSON.parse(await handleReadFile({ path: "pages/index.json" })) as {
+        children: { $ref: string }[];
+      };
+      expect(index.children[0]?.$ref).toBe("../components/my-button.json");
+      expect(report.references.refsUpdated).toBe(1);
+      expect(report.tag).toMatchObject({ from: "my-counter", to: "my-button" });
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 // ─── handleCreateDirectory ──────────────────────────────────────────────────
@@ -291,6 +365,62 @@ describe("discoverComponents", () => {
       expect(btn.path).toContain("my-button.json");
       expect(btn.props!.find((p) => p.name === "label")).toBeDefined();
       expect(btn.props!.find((p) => p.name === "onClick")).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("returns forward-slash paths for nested components", async () => {
+    setup();
+    try {
+      mkdirSync(join(FIXTURES, "components", "widgets"), { recursive: true });
+      writeFileSync(
+        join(FIXTURES, "components", "widgets", "my-button.json"),
+        JSON.stringify({ children: [], tagName: "my-button" }),
+      );
+
+      const components = await discoverComponents({ dir: "." });
+      const btn = components.find((c: ComponentMeta) => c.tagName === "my-button")!;
+      // Bun.Glob emits backslashes on Windows; the handler must normalize before returning.
+      expect(btn.path).toBe("components/widgets/my-button.json");
+      expect(btn.path).not.toContain("\\");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("extracts slot definitions with fallback children", async () => {
+    setup();
+    try {
+      mkdirSync(join(FIXTURES, "components"), { recursive: true });
+      writeFileSync(
+        join(FIXTURES, "components", "my-panel.json"),
+        JSON.stringify({
+          children: [
+            {
+              attributes: { name: "header" },
+              children: [{ tagName: "h2", textContent: "Default title" }],
+              tagName: "slot",
+            },
+            { children: ["Default body"], tagName: "slot" },
+          ],
+          tagName: "my-panel",
+        }),
+      );
+      // A slotless component, to confirm the key is omitted
+      writeFileSync(
+        join(FIXTURES, "components", "my-plain.json"),
+        JSON.stringify({ children: [{ tagName: "div" }], tagName: "my-plain" }),
+      );
+
+      const components = await discoverComponents({ dir: "." });
+      const panel = components.find((c: ComponentMeta) => c.tagName === "my-panel")!;
+      expect(panel.slots).toEqual([
+        { fallback: [{ tagName: "h2", textContent: "Default title" }], name: "header" },
+        { fallback: ["Default body"], name: "" },
+      ]);
+      const plain = components.find((c: ComponentMeta) => c.tagName === "my-plain")!;
+      expect(plain.slots).toBeUndefined();
     } finally {
       cleanup();
     }
@@ -742,6 +872,22 @@ describe("handleResolveSiteContext", () => {
     }
   });
 
+  test("returns a forward-slash sitePath for a deeply nested site", async () => {
+    setup();
+    try {
+      mkdirSync(join(FIXTURES, "sites", "blog", "pages"), { recursive: true });
+      writeFileSync(join(FIXTURES, "sites", "blog", "project.json"), '{"name": "blog"}');
+      const result = await handleResolveSiteContext({
+        filePath: "sites/blog/pages/index.json",
+      });
+      // Node's relative() yields a backslash path on Windows; the handler must normalize.
+      expect(result.sitePath).toBe("sites/blog");
+      expect(result.sitePath).not.toContain("\\");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("returns null when no project.json found", async () => {
     setup();
     try {
@@ -750,91 +896,6 @@ describe("handleResolveSiteContext", () => {
         filePath: "orphan/file.json",
       });
       expect(result.sitePath).toBeNull();
-    } finally {
-      cleanup();
-    }
-  });
-});
-
-// ─── handleReadFileAsDataUrl ──────────────────────────────────────────────
-
-describe("handleReadFileAsDataUrl", () => {
-  test("returns data URL for PNG file", async () => {
-    setup();
-    try {
-      const pngData = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
-      writeFileSync(join(FIXTURES, "image.png"), pngData);
-      const result = await handleReadFileAsDataUrl({ path: "image.png" });
-      expect(result).toStartWith("data:image/png;base64,");
-      const base64 = result.replace("data:image/png;base64,", "");
-      expect(Buffer.from(base64, "base64")).toEqual(pngData);
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("detects JPEG mime type", async () => {
-    setup();
-    try {
-      writeFileSync(join(FIXTURES, "photo.jpg"), Buffer.from([0xff, 0xd8]));
-      const result = await handleReadFileAsDataUrl({ path: "photo.jpg" });
-      expect(result).toStartWith("data:image/jpeg;base64,");
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("detects SVG mime type", async () => {
-    setup();
-    try {
-      writeFileSync(join(FIXTURES, "icon.svg"), "<svg></svg>");
-      const result = await handleReadFileAsDataUrl({ path: "icon.svg" });
-      expect(result).toStartWith("data:image/svg+xml;base64,");
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("uses octet-stream for unknown extensions", async () => {
-    setup();
-    try {
-      writeFileSync(join(FIXTURES, "file.xyz"), "data");
-      const result = await handleReadFileAsDataUrl({ path: "file.xyz" });
-      expect(result).toStartWith("data:application/octet-stream;base64,");
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("falls back to public/ directory", async () => {
-    setup();
-    try {
-      mkdirSync(join(FIXTURES, "public"), { recursive: true });
-      writeFileSync(join(FIXTURES, "public", "logo.png"), Buffer.from([0x89, 0x50]));
-      const result = await handleReadFileAsDataUrl({ path: "logo.png" });
-      expect(result).toStartWith("data:image/png;base64,");
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("throws for non-existent file in both root and public/", async () => {
-    setup();
-    try {
-      await expect(handleReadFileAsDataUrl({ path: "missing.png" })).rejects.toThrow(
-        "File not found",
-      );
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("rejects path traversal", async () => {
-    setup();
-    try {
-      await expect(handleReadFileAsDataUrl({ path: "../../etc/passwd" })).rejects.toThrow(
-        "Path outside project root",
-      );
     } finally {
       cleanup();
     }
@@ -889,7 +950,8 @@ describe("openProject", () => {
       expect(result).not.toBeNull();
       expect(result!.config.name).toBe("My Project");
       expect(result!.handle.name).toBe("My Project");
-      expect(result!.handle.root).toBe(".");
+      // The handle now carries the absolute project root (the re-openable recent-projects key).
+      expect(result!.handle.root).toBe(FIXTURES);
       expect(getProjectRoot()).toBe(FIXTURES);
     } finally {
       setFileDialog(null as unknown as () => Promise<string | null>);
@@ -907,6 +969,98 @@ describe("openProject", () => {
       expect(result!.handle.name).toBe("_fixtures_handlers");
     } finally {
       setFileDialog(null as unknown as () => Promise<string | null>);
+      cleanup();
+    }
+  });
+});
+
+// ─── createProject ─────────────────────────────────────────────────────────
+
+describe("createProject", () => {
+  const clearDialog = () => setDirectoryDialog(null as unknown as () => Promise<string | null>);
+
+  test("throws when no directory dialog is configured", async () => {
+    clearDialog();
+    await expect(createProject({ directory: "x", name: "X" })).rejects.toThrow(
+      "No directory dialog configured",
+    );
+  });
+
+  test("throws when name or directory is missing", async () => {
+    setDirectoryDialog(async () => FIXTURES);
+    try {
+      await expect(createProject({ directory: "", name: "" })).rejects.toThrow(
+        "name and directory are required",
+      );
+    } finally {
+      clearDialog();
+    }
+  });
+
+  test("throws when the folder picker is cancelled", async () => {
+    setDirectoryDialog(async () => null);
+    try {
+      await expect(createProject({ directory: "x", name: "X" })).rejects.toThrow(
+        "No destination folder was selected.",
+      );
+    } finally {
+      clearDialog();
+    }
+  });
+
+  test("scaffolds a blank project into the chosen folder and returns its config", async () => {
+    setup();
+    setDirectoryDialog(async () => FIXTURES);
+    try {
+      const result = await createProject({
+        description: "A new site",
+        directory: "my-new-site",
+        name: "My New Site",
+        url: "https://new.example",
+      });
+      expect(result.root).toBe(join(FIXTURES, "my-new-site"));
+      expect(result.config.name).toBe("My New Site");
+      expect(existsSync(join(FIXTURES, "my-new-site", "project.json"))).toBe(true);
+      expect(existsSync(join(FIXTURES, "my-new-site", "pages"))).toBe(true);
+      // The freshly-scaffolded project becomes the active project.
+      expect(getProjectRoot()).toBe(join(FIXTURES, "my-new-site"));
+    } finally {
+      clearDialog();
+      cleanup();
+    }
+  });
+
+  test("forwards a built-in template id to the generator", async () => {
+    setup();
+    setDirectoryDialog(async () => FIXTURES);
+    try {
+      const result = await createProject({
+        directory: "my-app",
+        name: "My App",
+        template: "mobile-first",
+      });
+      const media = (result.config as { $media?: Record<string, string> }).$media;
+      expect(media?.["--"]).toBe("375px");
+      expect(media?.["--lg"]).toBe("(min-width: 1024px)");
+    } finally {
+      clearDialog();
+      cleanup();
+    }
+  });
+
+  test("forwards design quickstart options to the generator", async () => {
+    setup();
+    setDirectoryDialog(async () => FIXTURES);
+    try {
+      const result = await createProject({
+        design: { accent: "#ff5500" },
+        directory: "my-designed-site",
+        name: "My Designed Site",
+      });
+      const { style } = result.config as { style?: Record<string, string> };
+      expect(style?.["--color-primary"]).toBe("#ff5500");
+    } finally {
+      clearDialog();
       cleanup();
     }
   });

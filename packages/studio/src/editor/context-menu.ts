@@ -19,6 +19,7 @@ import { convertToComponent } from "./convert-to-component";
 import { convertToRepeater } from "./convert-to-repeater";
 import { componentRegistry } from "../files/components";
 import { renderPopover } from "../ui/layers";
+import { rectOf } from "../utils/geometry";
 
 import type { JxPath } from "../state";
 import type { JxMutableNode } from "@jxsuite/schema/types";
@@ -70,10 +71,12 @@ function nodeToHtml(node: JxNode | string): string {
 async function writeToClipboard(json: Record<string, unknown>) {
   workspace.clipboard = json;
   try {
+    const jxBlob = new Blob([JSON.stringify(json)], { type: JX_MIME });
+    const htmlBlob = new Blob([nodeToHtml(json)], { type: "text/html" });
     await navigator.clipboard.write([
       new ClipboardItem({
-        [JX_MIME]: new Blob([JSON.stringify(json)], { type: JX_MIME }),
-        "text/html": new Blob([nodeToHtml(json)], { type: "text/html" }),
+        [JX_MIME]: jxBlob,
+        "text/html": htmlBlob,
       }),
     ]);
   } catch {
@@ -97,7 +100,7 @@ async function readFromClipboard() {
     for (const item of items) {
       if (item.types.includes(JX_MIME)) {
         const blob = await item.getType(JX_MIME);
-        const json = JSON.parse(await blob.text());
+        const json = JSON.parse(await blob.text()) as JxNode;
         return [json];
       }
       if (item.types.includes("text/html")) {
@@ -116,7 +119,7 @@ async function readFromClipboard() {
         const text = await blob.text();
         // Try parsing as Jx JSON
         try {
-          const parsed = JSON.parse(text);
+          const parsed = JSON.parse(text) as JxNode;
           if (parsed && parsed.tagName) {
             return [parsed];
           }
@@ -191,14 +194,14 @@ export async function pasteNode() {
     const idx = childIndex(tab.session.selection) as number;
     transactDoc(tab, (t) => {
       for (let i = 0; i < nodes.length; i++) {
-        mutateInsertNode(t, pp, idx + 1 + i, nodes[i]);
+        mutateInsertNode(t, pp, idx + 1 + i, nodes[i]!);
       }
     });
   } else {
     const idx = Array.isArray(parent.children) ? parent.children.length : 0;
     transactDoc(tab, (t) => {
       for (let i = 0; i < nodes.length; i++) {
-        mutateInsertNode(t, pPath, idx + i, nodes[i]);
+        mutateInsertNode(t, pPath, idx + i, nodes[i]!);
       }
     });
   }
@@ -272,16 +275,23 @@ export function showContextMenu(
   // Select the node
   tab.session.selection = path;
 
+  // Index-based structural actions (cut/duplicate/insert/wrap/delete) require a numeric child
+  // Index. Repeater templates (path tail "map") and the document root don't have one — they get
+  // Copy only — so we never splice with a non-numeric index.
+  const idxIsNumber = typeof childIndex(path) === "number";
+
   const items: { label: string; action?: () => void | Promise<void>; danger?: boolean }[] = [
     { action: () => copyNode(), label: "Copy" },
   ];
 
-  if (path.length >= 2) {
-    items.push({ action: () => cutNode(), label: "Cut" });
-    items.push({
-      action: () => transactDoc(activeTab.value, (t) => mutateDuplicateNode(t, path)),
-      label: "Duplicate",
-    });
+  if (path.length >= 2 && idxIsNumber) {
+    items.push(
+      { action: () => cutNode(), label: "Cut" },
+      {
+        action: () => transactDoc(activeTab.value, (t) => mutateDuplicateNode(t, path)),
+        label: "Duplicate",
+      },
+    );
     if (node.style) {
       const nodeStyle = node.style;
       items.push({
@@ -305,33 +315,36 @@ export function showContextMenu(
         label: "Paste styles",
       });
     }
-    items.push({ label: "—" }); // Separator
-    items.push({
-      action: () => {
-        const pp = parentElementPath(path) as JxPath;
-        const idx = childIndex(path) as number;
-        transactDoc(activeTab.value, (t) =>
-          mutateInsertNode(t, pp, idx, { children: [], tagName: "p" }),
-        );
+    // Separator
+    items.push(
+      { label: "—" },
+      {
+        action: () => {
+          const pp = parentElementPath(path) as JxPath;
+          const idx = childIndex(path) as number;
+          transactDoc(activeTab.value, (t) =>
+            mutateInsertNode(t, pp, idx, { children: [], tagName: "p" }),
+          );
+        },
+        label: "Insert before",
       },
-      label: "Insert before",
-    });
-    items.push({
-      action: () => {
-        const pp = parentElementPath(path) as JxPath;
-        const idx = childIndex(path) as number;
-        transactDoc(activeTab.value, (t) =>
-          mutateInsertNode(t, pp, idx + 1, { children: [], tagName: "p" }),
-        );
+      {
+        action: () => {
+          const pp = parentElementPath(path) as JxPath;
+          const idx = childIndex(path) as number;
+          transactDoc(activeTab.value, (t) =>
+            mutateInsertNode(t, pp, idx + 1, { children: [], tagName: "p" }),
+          );
+        },
+        label: "Insert after",
       },
-      label: "Insert after",
-    });
-    items.push({
-      action: () => transactDoc(activeTab.value, (t) => mutateWrapNode(t, path)),
-      label: "Wrap in Div",
-    });
-    // Don't show Repeat if already inside a repeater (path ends with "children", "map")
-    if (!(path.length >= 2 && path.at(-2) === "children" && path.at(-1) === "map")) {
+      {
+        action: () => transactDoc(activeTab.value, (t) => mutateWrapNode(t, path)),
+        label: "Wrap in Div",
+      },
+    );
+    // Don't offer Repeat on a repeater template (path tail "map") or on an array node itself.
+    if (path.at(-1) !== "map" && (node as JxMutableNode).$prototype !== "Array") {
       items.push({
         action: () => convertToRepeater(),
         label: "Repeat...",
@@ -368,48 +381,56 @@ export function showContextMenu(
         });
       }
     }
-    items.push({ label: "—" }); // Separator
-    items.push({
-      action: () => transactDoc(activeTab.value, (t) => mutateRemoveNode(t, path)),
-      danger: true,
-      label: "Delete",
-    });
+    // Separator
+    items.push(
+      { label: "—" },
+      {
+        action: () => transactDoc(activeTab.value, (t) => mutateRemoveNode(t, path)),
+        danger: true,
+        label: "Delete",
+      },
+    );
   }
-  if (path.length >= 2) {
-    items.push({ label: "—" });
-    items.push({
-      action: async () => {
-        const nodes = await readFromClipboard();
-        if (!nodes || nodes.length === 0) {
-          return;
-        }
-        const idx = Array.isArray(node.children) ? node.children.length : 0;
-        transactDoc(activeTab.value, (t) => {
-          for (let i = 0; i < nodes.length; i++) {
-            mutateInsertNode(t, path, idx + i, nodes[i]);
+  // Paste targets — never into/after an array node (its content is the single map template).
+  if (path.length >= 2 && (node as JxMutableNode).$prototype !== "Array") {
+    items.push(
+      { label: "—" },
+      {
+        action: async () => {
+          const nodes = await readFromClipboard();
+          if (!nodes || nodes.length === 0) {
+            return;
           }
-        });
-        statusMessage("Pasted");
+          const idx = Array.isArray(node.children) ? node.children.length : 0;
+          transactDoc(activeTab.value, (t) => {
+            for (let i = 0; i < nodes.length; i++) {
+              mutateInsertNode(t, path, idx + i, nodes[i]!);
+            }
+          });
+          statusMessage("Pasted");
+        },
+        label: "Paste inside",
       },
-      label: "Paste inside",
-    });
-    items.push({
-      action: async () => {
-        const nodes = await readFromClipboard();
-        if (!nodes || nodes.length === 0) {
-          return;
-        }
-        const pp = parentElementPath(path) as JxPath;
-        const idx = childIndex(path) as number;
-        transactDoc(activeTab.value, (t) => {
-          for (let i = 0; i < nodes.length; i++) {
-            mutateInsertNode(t, pp, idx + 1 + i, nodes[i]);
+    );
+    if (idxIsNumber) {
+      items.push({
+        action: async () => {
+          const nodes = await readFromClipboard();
+          if (!nodes || nodes.length === 0) {
+            return;
           }
-        });
-        statusMessage("Pasted");
-      },
-      label: "Paste after",
-    });
+          const pp = parentElementPath(path) as JxPath;
+          const idx = childIndex(path) as number;
+          transactDoc(activeTab.value, (t) => {
+            for (let i = 0; i < nodes.length; i++) {
+              mutateInsertNode(t, pp, idx + 1 + i, nodes[i]!);
+            }
+          });
+          statusMessage("Pasted");
+        },
+        label: "Paste after",
+      });
+    }
   }
 
   let x = e.clientX,
@@ -425,7 +446,7 @@ export function showContextMenu(
         }
         requestAnimationFrame(() => {
           const popover = el as HTMLElement;
-          const menuRect = popover.getBoundingClientRect();
+          const menuRect = rectOf(popover);
           if (x + menuRect.width > window.innerWidth) {
             x = window.innerWidth - menuRect.width - 4;
           }
@@ -445,7 +466,7 @@ export function showContextMenu(
                 style=${item.danger ? "color: var(--danger)" : ""}
                 @click=${() => {
                   dismissContextMenu();
-                  item.action?.();
+                  void item.action?.();
                 }}
                 >${item.label}</sp-menu-item
               >`,

@@ -16,20 +16,18 @@ import { createState, projectState, requireProjectState, setProjectState } from 
 import { getPlatform } from "../platform";
 import { statusMessage } from "../panels/statusbar";
 import { loadComponentRegistry } from "./components";
+import { ensureDependenciesInstalled } from "../packages/ensure-deps";
+import { maybePromptJxsuiteUpdate } from "../packages/jxsuite-update";
+import { autoSyncProjectOnOpen } from "../packages/pull-package-sync";
+import { markLocalMutation } from "./fs-events";
+import { isCollabPath } from "../collab/collab-state";
 import {
   draggable,
   dropTargetForElements,
   monitorForElements,
 } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
-import {
-  activateTab,
-  activeTab,
-  openTab,
-  renameTab,
-  replaceAllTabs,
-  workspace,
-} from "../workspace/workspace";
+import { activateTab, openTab, renameTab, replaceAllTabs, workspace } from "../workspace/workspace";
 import { parseSourceForPath, serializeDocument } from "./file-ops";
 import {
   documentExtensions,
@@ -41,8 +39,11 @@ import {
 import { view } from "../view";
 import { addRecentProject, trackRecentFile } from "../recent-projects";
 import type { TemplateResult } from "lit-html";
+import type { JxMutableNode } from "@jxsuite/schema/types";
 import type { StudioState } from "../state.js";
 import type { Tab } from "../tabs/tab.js";
+import type { RenameResult } from "../types";
+import { rectOf } from "../utils/geometry";
 
 // ─── File icon map ────────────────────────────────────────────────────────────
 
@@ -97,9 +98,13 @@ export async function loadProject() {
     });
 
     if (info.isSiteProject) {
+      addRecentProject(requireProjectState().name, meta.root);
+      await autoSyncProjectOnOpen();
+      await ensureDependenciesInstalled();
       await loadDirectory(".");
       await loadComponentRegistry();
       await openHomePage();
+      void maybePromptJxsuiteUpdate(meta.root);
     }
     // If not a site project (monorepo) — show welcome prompt, don't load tree
   } catch {
@@ -153,6 +158,8 @@ export async function openProject({
       selectedPath: null,
     });
 
+    await autoSyncProjectOnOpen();
+    await ensureDependenciesInstalled();
     await loadDirectory(".");
     await loadComponentRegistry();
 
@@ -184,6 +191,7 @@ export async function openProject({
     statusMessage(`Opened project: ${requireProjectState().name}`);
 
     await openHomePage();
+    void maybePromptJxsuiteUpdate(requireProjectState().projectRoot);
   } catch (error) {
     statusMessage(`Error: ${errorMessage(error)}`);
   }
@@ -339,7 +347,7 @@ function renderTreeLevelTemplate(
 ): TemplateResult | TemplateResult[] {
   const entries = requireProjectState().dirs.get(dirPath);
   if (!entries) {
-    loadDirectory(dirPath).then(() => ctx.renderLeftPanel());
+    void loadDirectory(dirPath).then(() => ctx.renderLeftPanel());
     return html`<div
       class="file-tree-item"
       style="padding-left:${8 + depth * 16}px;color:var(--fg-dim);font-style:italic"
@@ -427,13 +435,13 @@ export function setupTreeKeyboard(tree: HTMLElement) {
     switch (e.key) {
       case "ArrowDown": {
         if (idx < items.length - 1) {
-          items[idx + 1].focus();
+          items[idx + 1]!.focus();
         }
         break;
       }
       case "ArrowUp": {
         if (idx > 0) {
-          items[idx - 1].focus();
+          items[idx - 1]!.focus();
         }
         break;
       }
@@ -442,7 +450,7 @@ export function setupTreeKeyboard(tree: HTMLElement) {
           const path = focused.dataset.path as string;
           if (!requireProjectState().expanded.has(path)) {
             requireProjectState().expanded.add(path);
-            loadDirectory(path).then(() => {
+            void loadDirectory(path).then(() => {
               const panel = tree.closest(".panel-body");
               if (panel) {
                 (panel.querySelector(".file-tree-item:focus") as HTMLElement | null)?.click();
@@ -619,7 +627,7 @@ export function registerFileTreeDnD({ renderLeftPanel }: { renderLeftPanel: () =
           return;
         }
 
-        moveFileEntry(srcPath, newPath!, renderLeftPanel);
+        void moveFileEntry(srcPath, newPath!, renderLeftPanel);
       },
     });
     _fileTreeDndCleanups.push(monitorCleanup);
@@ -635,8 +643,9 @@ export function registerFileTreeDnD({ renderLeftPanel }: { renderLeftPanel: () =
  */
 async function moveFileEntry(oldPath: string, newPath: string, renderLeftPanel: () => void) {
   const platform = getPlatform();
+  markLocalMutation(oldPath, newPath);
   try {
-    await platform.renameFile(oldPath, newPath);
+    const report = await platform.renameFile(oldPath, newPath);
 
     // Update open tabs referencing the moved path
     for (const [id] of workspace.tabs.entries()) {
@@ -661,6 +670,7 @@ async function moveFileEntry(oldPath: string, newPath: string, renderLeftPanel: 
       requireProjectState().expanded.add(newParent);
     }
 
+    reloadRewrittenTabs(report, newPath);
     renderLeftPanel();
     statusMessage(`Moved to ${newPath}`);
   } catch (error) {
@@ -707,16 +717,18 @@ function showFileContextMenu(
       label: "New File\u2026",
     });
   }
-  items.push({ label: "\u2014" });
-  items.push({
-    action: () => renameFile(entry, ctx.renderLeftPanel),
-    label: "Rename\u2026",
-  });
-  items.push({
-    action: () => deleteFile(entry, ctx.renderLeftPanel),
-    danger: true,
-    label: "Delete",
-  });
+  items.push(
+    { label: "\u2014" },
+    {
+      action: () => renameFile(entry, ctx.renderLeftPanel),
+      label: "Rename\u2026",
+    },
+    {
+      action: () => deleteFile(entry, ctx.renderLeftPanel),
+      danger: true,
+      label: "Delete",
+    },
+  );
 
   let x = e.clientX,
     y = e.clientY;
@@ -731,7 +743,7 @@ function showFileContextMenu(
         }
         requestAnimationFrame(() => {
           const popover = el as HTMLElement;
-          const menuRect = popover.getBoundingClientRect();
+          const menuRect = rectOf(popover);
           if (x + menuRect.width > window.innerWidth) {
             x = window.innerWidth - menuRect.width - 4;
           }
@@ -751,7 +763,7 @@ function showFileContextMenu(
                 style=${item.danger ? "color: var(--danger)" : ""}
                 @click=${() => {
                   dismissFileContextMenu();
-                  item.action?.();
+                  void item.action?.();
                 }}
                 >${item.label}</sp-menu-item
               >`,
@@ -776,6 +788,7 @@ async function createNewFile(dirPath: string, renderLeftPanel: () => void) {
     return;
   }
   const path = dirPath === "." ? name : `${dirPath}/${name}`;
+  markLocalMutation(path);
   await loadFormats();
   const format = formatForPath(name);
   const content =
@@ -846,6 +859,28 @@ function showRenameFileDialog(currentName: string): Promise<string | null> {
   });
 }
 
+/** Build the status-bar message for a rename, summarising any reference/tag rewrites. */
+function renameStatus(newName: string, report: RenameResult): string {
+  const refs = report.references;
+  const tagNote = report.tag ? `; tag → <${report.tag.to}> (${report.tag.refsUpdated})` : "";
+  if (refs && refs.refsUpdated > 0) {
+    return `Renamed to ${newName}; updated ${refs.refsUpdated} reference(s) in ${refs.filesChanged} file(s)${tagNote}`;
+  }
+  if (tagNote) {
+    return `Renamed to ${newName}${tagNote}`;
+  }
+  return `Renamed to ${newName}`;
+}
+
+/** Reload any open tabs whose references the refactor rewrote (so the editor shows new paths). */
+function reloadRewrittenTabs(report: RenameResult, skipPath: string): void {
+  for (const f of report.references?.files ?? []) {
+    if (f.path !== skipPath && workspace.tabs.has(f.path)) {
+      void reloadFileInTab(f.path);
+    }
+  }
+}
+
 async function renameFile(
   entry: { name: string; path: string; type: string },
   renderLeftPanel: () => void,
@@ -859,9 +894,10 @@ async function renameFile(
     ? entryPath.slice(0, entryPath.lastIndexOf("/"))
     : ".";
   const newPath = parentDirPath === "." ? newName : `${parentDirPath}/${newName}`;
+  markLocalMutation(entry.path, newPath);
   try {
     const platform = getPlatform();
-    await platform.renameFile(entry.path, newPath);
+    const report = await platform.renameFile(entry.path, newPath);
     await loadDirectory(parentDirPath);
     if (requireProjectState().selectedPath === entry.path) {
       requireProjectState().selectedPath = newPath;
@@ -869,8 +905,9 @@ async function renameFile(
     if (workspace.tabs.has(entry.path)) {
       renameTab(entry.path, newPath, newPath);
     }
+    reloadRewrittenTabs(report, newPath);
     renderLeftPanel();
-    statusMessage(`Renamed to ${newName}`);
+    statusMessage(renameStatus(newName, report));
   } catch (error) {
     statusMessage(`Error: ${errorMessage(error)}`);
   }
@@ -889,6 +926,7 @@ async function deleteFile(
   }
   try {
     const platform = getPlatform();
+    markLocalMutation(entry.path);
     await platform.deleteFile(entry.path);
     const delPath = entry.path.replaceAll("\\", "/");
     const parentDirPath = delPath.includes("/") ? delPath.slice(0, delPath.lastIndexOf("/")) : ".";
@@ -953,12 +991,12 @@ export async function openFileFromTree(
     }
 
     if (formatForPath(path)) {
-      await ctx.loadMarkdown(content, null);
+      ctx.loadMarkdown(content, null);
       ctx.S.documentPath = path;
       ctx.S.dirty = false;
       ctx.commit(ctx.S);
     } else if (path.endsWith(".json")) {
-      const doc = JSON.parse(content);
+      const doc = JSON.parse(content) as JxMutableNode;
       const newS = createState(doc);
       newS.documentPath = path;
       newS.dirty = false;
@@ -999,14 +1037,15 @@ export async function openFileInTab(path: string) {
     }
 
     await loadFormats();
-    let document, frontmatter;
+    let document: Record<string, unknown>;
+    let frontmatter: Record<string, unknown> | undefined;
     const format = formatForPath(path);
     if (format) {
       const result = await parseSourceForPath(path, content);
       ({ document } = result);
       ({ frontmatter } = result);
     } else if (path.endsWith(".json")) {
-      document = JSON.parse(content);
+      document = JSON.parse(content) as Record<string, unknown>;
     } else {
       throw noFormatError(path);
     }
@@ -1020,14 +1059,11 @@ export async function openFileInTab(path: string) {
       sourceFormat: format?.name ?? null,
     });
     requireProjectState().selectedPath = path;
-    trackRecentFile({ name: path.split("/").pop() || path, path });
-
-    if (path === "project.json") {
-      const tab = activeTab.value;
-      if (tab) {
-        tab.session.ui.canvasMode = "stylebook";
-      }
-    }
+    trackRecentFile({
+      name: path.split("/").pop() || path,
+      path,
+      root: requireProjectState().projectRoot,
+    });
 
     statusMessage(`Opened ${path.split("/").pop()}`);
   } catch (error) {
@@ -1041,6 +1077,21 @@ export async function openFileInTab(path: string) {
  *
  * @param {string} path
  */
+/** Reload an open tab from disk when an external change arrives — but only if it is not dirty. */
+export function reloadCleanTab(path: string): void {
+  // Co-edited docs never reload from disk: the shared Y.Doc is ahead of the provider's write-back
+  // (Which is what produced this event), and genuine external changes arrive as a collab reset.
+  if (isCollabPath(path)) {
+    return;
+  }
+  for (const [, tab] of workspace.tabs.entries()) {
+    if (tab.documentPath === path && !tab.doc.dirty) {
+      void reloadFileInTab(path);
+      return;
+    }
+  }
+}
+
 export async function reloadFileInTab(path: string) {
   for (const [, tab] of workspace.tabs.entries()) {
     if (tab.documentPath === path) {
@@ -1056,7 +1107,7 @@ export async function reloadFileInTab(path: string) {
           tab.doc.document = document;
           tab.doc.content.frontmatter = frontmatter;
         } else if (path.endsWith(".json")) {
-          tab.doc.document = JSON.parse(content);
+          tab.doc.document = JSON.parse(content) as JxMutableNode;
         }
         tab.doc.dirty = false;
       } catch {}

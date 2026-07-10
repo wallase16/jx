@@ -42,8 +42,11 @@ export function renderUnitSelector(
   if (isKeyword) {
     displayValue = strVal;
   } else if (match) {
-    [, displayValue] = match;
+    displayValue = match[1]!;
   } else if (strVal !== "") {
+    // Intentional partial parse: shorthand like "10px 20px" displays its leading number.
+    // Number() yields NaN for those, so Number.parseFloat stays (see unit-selector tests).
+    // oxlint-disable-next-line unicorn/prefer-number-coercion
     const num = Number.parseFloat(strVal);
     displayValue = Number.isNaN(num) ? strVal : String(num);
   } else {
@@ -52,7 +55,7 @@ export function renderUnitSelector(
 
   // Parse placeholder so inherited values display as "500" not "500px"
   const placeholderMatch = placeholder.match(UNIT_RE);
-  const numericPlaceholder = placeholderMatch ? placeholderMatch[1] : placeholder || "0";
+  const numericPlaceholder = placeholderMatch ? placeholderMatch[1]! : placeholder || "0";
 
   const isExpression = isKeyword || (displayValue !== "" && !isNumericVal(displayValue));
   const hasUnits = units.length > 0 || keywords.length > 0;

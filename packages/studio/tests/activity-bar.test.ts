@@ -3,13 +3,18 @@ import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "
 import type { TemplateResult } from "lit-html";
 
 const refreshGitStatus = mock(async () => {});
-mock.module("../src/panels/git-panel.js", () => ({
+void mock.module("../src/panels/git-panel.js", () => ({
   refreshGitStatus,
 }));
 
 const openSettingsModal = mock(() => {});
-mock.module("../src/settings/settings-modal.js", () => ({
+void mock.module("../src/settings/settings-modal.js", () => ({
   openSettingsModal,
+}));
+
+const openAboutModal = mock(() => {});
+void mock.module("../src/about/about-modal.js", () => ({
+  openAboutModal,
 }));
 
 const store = await import("../src/store");
@@ -37,6 +42,7 @@ beforeEach(() => {
   view.leftPanelCollapsed = false;
   refreshGitStatus.mockClear();
   openSettingsModal.mockClear();
+  openAboutModal.mockClear();
   // Note: never wipe bar().innerHTML — lit owns the container and caches its parts.
   document.querySelector("#app")?.classList.remove("left-collapsed", "right-collapsed");
 });
@@ -112,6 +118,7 @@ describe("renderActivityBar", () => {
       "git",
     ]);
     expect(bar().querySelector("sp-action-button[title='Settings']")).not.toBeNull();
+    expect(bar().querySelector("sp-action-button[title='About']")).not.toBeNull();
   });
 
   test("selects the current left tab when panel is open", () => {
@@ -185,6 +192,13 @@ describe("renderActivityBar", () => {
     const btn = bar().querySelector("sp-action-button[title='Settings']") as HTMLElement;
     btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(openSettingsModal).toHaveBeenCalledTimes(1);
+  });
+
+  test("about button opens the about modal", () => {
+    renderActivityBar();
+    const btn = bar().querySelector("sp-action-button[title='About']") as HTMLElement;
+    btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(openAboutModal).toHaveBeenCalledTimes(1);
   });
 });
 

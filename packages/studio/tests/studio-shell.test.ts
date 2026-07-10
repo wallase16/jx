@@ -11,7 +11,6 @@ import { flush, installMockPlatform, resetStudioState } from "./harness";
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { activeTab, closeAllTabs, openTab, workspace } from "../src/workspace/workspace";
 import { view } from "../src/view";
-import { canvasPanels } from "../src/store";
 import { resetZoom } from "../src/canvas/canvas-utils";
 import type { Tab } from "../src/tabs/tab";
 
@@ -62,6 +61,7 @@ document.body.innerHTML = `
 // ─── Captured wiring contexts ─────────────────────────────────────────────────
 
 let toolbarCtx: any = null;
+let tabBarCtx: any = null;
 let welcomeCtx: any = null;
 let blockBarCtx: any = null;
 let canvasRenderCtx: any = null;
@@ -75,9 +75,9 @@ let consumePatchedReturn = false;
 const consumePatchedMock = mock((_doc: object) => consumePatchedReturn);
 let newProjectResult: { root: string } | null = null;
 
-mock.module("../src/services/monaco-setup.js", () => ({}));
+void mock.module("../src/services/monaco-setup.js", () => ({}));
 
-mock.module("monaco-editor/esm/vs/editor/editor.api.js", () => ({
+void mock.module("monaco-editor/esm/vs/editor/editor.api.js", () => ({
   KeyCode: {},
   KeyMod: {},
   MarkerSeverity: { Error: 8, Warning: 4 },
@@ -89,7 +89,7 @@ mock.module("monaco-editor/esm/vs/editor/editor.api.js", () => ({
   },
 }));
 
-mock.module("../src/panels/statusbar.ts", () => ({
+void mock.module("../src/panels/statusbar.ts", () => ({
   mountStatusbar: mock(() => {}),
   renderStatusbar: mock(() => {}),
   setStatusbarRenderer: mock(() => {}),
@@ -99,7 +99,7 @@ mock.module("../src/panels/statusbar.ts", () => ({
   unmountStatusbar: mock(() => {}),
 }));
 
-mock.module("../src/panels/toolbar.ts", () => ({
+void mock.module("../src/panels/toolbar.ts", () => ({
   mount: (_el: HTMLElement, ctx: unknown) => {
     toolbarCtx = ctx;
   },
@@ -107,30 +107,38 @@ mock.module("../src/panels/toolbar.ts", () => ({
   unmount: mock(() => {}),
 }));
 
-mock.module("../src/panels/welcome-screen.ts", () => ({
+void mock.module("../src/panels/tab-bar.ts", () => ({
+  mount: (_el: HTMLElement, ctx: unknown) => {
+    tabBarCtx = ctx;
+  },
+  render: mock(() => {}),
+  unmount: mock(() => {}),
+}));
+
+void mock.module("../src/panels/welcome-screen.ts", () => ({
   initWelcome: (ctx: unknown) => {
     welcomeCtx = ctx;
   },
   renderWelcome: mock(() => {}),
 }));
 
-mock.module("../src/editor/shortcuts.ts", () => ({
+void mock.module("../src/editor/shortcuts.ts", () => ({
   initShortcuts: (get: () => unknown) => {
     shortcutsGet = get as () => any;
   },
 }));
 
-mock.module("../src/panels/block-action-bar.ts", () => ({
+void mock.module("../src/panels/block-action-bar.ts", () => ({
   dismissBlockActionBar: mock(() => {}),
   dismissLinkPopover: mock(() => {}),
   initBlockActionBar: (ctx: unknown) => {
     blockBarCtx = ctx;
   },
+  isEditChromeTarget: mock(() => false),
   renderBlockActionBar: mock(() => {}),
 }));
 
-mock.module("../src/canvas/canvas-render.ts", () => ({
-  applyCanvasMediaOverrides: mock(() => {}),
+void mock.module("../src/canvas/canvas-render.ts", () => ({
   initCanvasRender: (ctx: unknown) => {
     canvasRenderCtx = ctx;
   },
@@ -139,7 +147,7 @@ mock.module("../src/canvas/canvas-render.ts", () => ({
   scheduleCanvasRender: scheduleCanvasRenderMock,
 }));
 
-mock.module("../src/canvas/canvas-patcher.ts", () => ({
+void mock.module("../src/canvas/canvas-patcher.ts", () => ({
   applyPatchBatch: mock(() => {}),
   classifyOps: mock(() => ({ patchable: false, reason: "mock" })),
   consumePatchedDocument: consumePatchedMock,
@@ -149,7 +157,7 @@ mock.module("../src/canvas/canvas-patcher.ts", () => ({
   },
 }));
 
-mock.module("../src/new-project/new-project-modal.ts", () => ({
+void mock.module("../src/new-project/new-project-modal.ts", () => ({
   closeNewProjectModal: mock(() => {}),
   openNewProjectModal: mock(async () => newProjectResult),
 }));
@@ -208,6 +216,7 @@ beforeEach(() => {
 describe("bootstrap", () => {
   test("captures wiring contexts for every mocked panel module", () => {
     expect(toolbarCtx).not.toBeNull();
+    expect(tabBarCtx).not.toBeNull();
     expect(welcomeCtx).not.toBeNull();
     expect(blockBarCtx).not.toBeNull();
     expect(canvasRenderCtx).not.toBeNull();
@@ -349,7 +358,7 @@ describe("navigateBack", () => {
 
   test("no-op when the document stack is empty", async () => {
     openShellTab();
-    await toolbarCtx.navigateBack();
+    await tabBarCtx.navigateBack();
     expect(statusMessages).toHaveLength(0);
   });
 
@@ -358,7 +367,7 @@ describe("navigateBack", () => {
     tab.session.documentStack = [frameFor("section")] as any;
     tab.documentPath = "components/card.json";
     tab.doc.dirty = true;
-    await toolbarCtx.navigateBack();
+    await tabBarCtx.navigateBack();
     expect(state.files.get("components/card.json")).toContain('"tagName"');
     expect((tab.doc.document as any).tagName).toBe("section");
     expect(tab.documentPath).toBe("pages/parent.json");
@@ -375,7 +384,7 @@ describe("navigateBack", () => {
       throw new Error("disk full");
     };
     try {
-      await toolbarCtx.navigateBack();
+      await tabBarCtx.navigateBack();
     } finally {
       platform.writeFile = originalWrite;
     }
@@ -389,7 +398,7 @@ describe("navigateBack", () => {
     tab.session.documentStack = [undefined] as any;
     tab.doc.dirty = false;
     const before = tab.doc.document;
-    await toolbarCtx.navigateBack();
+    await tabBarCtx.navigateBack();
     expect(tab.doc.document).toBe(before);
     expect(statusMessages).toHaveLength(0);
   });
@@ -410,22 +419,22 @@ describe("navigateToLevel", () => {
   test("ignores out-of-range indexes", async () => {
     const tab = openShellTab();
     tab.session.documentStack = [frame("one")] as any;
-    await toolbarCtx.navigateToLevel(-1);
-    await toolbarCtx.navigateToLevel(5);
+    await tabBarCtx.navigateToLevel(-1);
+    await tabBarCtx.navigateToLevel(5);
     expect(tab.session.documentStack).toHaveLength(1);
     expect(statusMessages).toHaveLength(0);
   });
 
   test("ignores calls when there is no stack at all", async () => {
     openShellTab();
-    await toolbarCtx.navigateToLevel(0);
+    await tabBarCtx.navigateToLevel(0);
     expect(statusMessages).toHaveLength(0);
   });
 
   test("jumps to an ancestor level, truncating the stack", async () => {
     const tab = openShellTab();
     tab.session.documentStack = [frame("root"), frame("mid")] as any;
-    await toolbarCtx.navigateToLevel(0);
+    await tabBarCtx.navigateToLevel(0);
     expect((tab.doc.document as any).tagName).toBe("root");
     expect(tab.documentPath).toBe("pages/root.json");
     expect(tab.session.documentStack).toHaveLength(0);
@@ -437,7 +446,7 @@ describe("navigateToLevel", () => {
     tab.session.documentStack = [frame("root")] as any;
     tab.documentPath = "pages/deep.json";
     tab.doc.dirty = true;
-    await toolbarCtx.navigateToLevel(0);
+    await tabBarCtx.navigateToLevel(0);
     expect(state.files.has("pages/deep.json")).toBe(true);
     expect((tab.doc.document as any).tagName).toBe("root");
   });
@@ -452,7 +461,7 @@ describe("navigateToLevel", () => {
       throw new Error("readonly fs");
     };
     try {
-      await toolbarCtx.navigateToLevel(0);
+      await tabBarCtx.navigateToLevel(0);
     } finally {
       platform.writeFile = originalWrite;
     }
@@ -591,6 +600,36 @@ describe("openRecentProject", () => {
     expect(statusMessages).toContain("Opened project: Recent Project");
   });
 
+  test("switching projects refreshes the format registry (stale-cache regression)", async () => {
+    const { formatForPath, loadFormats, setFormats } = await import("../src/format/format-host");
+    // A fresh desktop launch caches a registry with no Markdown (no project open / previous root)…
+    setFormats([]);
+    expect(formatForPath("pages/contact.md")).toBeUndefined();
+    // …and the newly-opened project's backend registry claims .md.
+    (platform as any).listFormats = async () => [
+      {
+        capabilities: { parse: { identifier: "parse", timing: ["client"] } },
+        documentKinds: ["page"],
+        exportTarget: false,
+        extensions: [".md"],
+        mediaType: "text/markdown",
+        name: "Markdown",
+        remote: false,
+        studio: null,
+      },
+    ];
+    try {
+      await toolbarCtx.openRecentProject("/recent/site");
+      await loadFormats();
+      // Without the refreshFormats() in openRecentProject the stale empty cache answers and
+      // Opening any .md fails with "No format class imported".
+      expect(formatForPath("pages/contact.md")?.name).toBe("Markdown");
+    } finally {
+      delete (platform as any).listFormats;
+      setFormats([]);
+    }
+  });
+
   test("reports a missing project.json as an error", async () => {
     const saved = state.files.get("project.json")!;
     state.files.delete("project.json");
@@ -656,9 +695,9 @@ describe("wiring arrows", () => {
     expect(renderCanvasMock).toHaveBeenCalledTimes(1);
   });
 
-  test("toolbar exposes parseMediaEntries from canvas-media utils", () => {
-    expect(typeof toolbarCtx.parseMediaEntries).toBe("function");
-    expect(toolbarCtx.parseMediaEntries(null)).toEqual({
+  test("tab bar exposes parseMediaEntries from canvas-media utils", () => {
+    expect(typeof tabBarCtx.parseMediaEntries).toBe("function");
+    expect(tabBarCtx.parseMediaEntries(null)).toEqual({
       baseWidth: 320,
       featureQueries: [],
       sizeBreakpoints: [],
@@ -671,8 +710,8 @@ describe("wiring arrows", () => {
     expect(state.calls.filter((c) => c[0] === "openProject").length).toBe(before + 1);
   });
 
-  test("canvas render ctx exposes the export and git-diff hooks", () => {
-    expect(typeof canvasRenderCtx.exportFile).toBe("function");
+  test("tab bar exposes exportFile; canvas render ctx exposes the git-diff hooks", () => {
+    expect(typeof tabBarCtx.exportFile).toBe("function");
     expect(typeof canvasRenderCtx.setCanvasMode).toBe("function");
     canvasRenderCtx.setGitDiffState({ path: "x" });
     expect(canvasRenderCtx.gitDiffState).toEqual({ path: "x" });
@@ -700,45 +739,6 @@ describe("shortcuts context", () => {
     expect(view.panX).toBe(12);
     expect(view.panY).toBe(34);
     expect(view.needsCenter).toBe(false);
-  });
-
-  test("enterEditOnPath defers via rAF and tolerates a missing canvas panel", async () => {
-    openShellTab();
-    const origRaf = globalThis.requestAnimationFrame;
-    let ran = false;
-    (globalThis as any).requestAnimationFrame = (cb: FrameRequestCallback) => {
-      ran = true;
-      cb(0);
-      return 0;
-    };
-    try {
-      const ctx = shortcutsGet!();
-      expect(() => ctx.enterEditOnPath(["children", 0])).not.toThrow();
-    } finally {
-      globalThis.requestAnimationFrame = origRaf;
-    }
-    expect(ran).toBe(true);
-  });
-
-  test("enterEditOnPath resolves the element through the active canvas panel", () => {
-    openShellTab();
-    const canvas = document.createElement("div");
-    canvas.innerHTML = "<div><jx-widget>nope</jx-widget></div>";
-    canvasPanels.push({ canvas, mediaName: "base" } as any);
-    const origRaf = globalThis.requestAnimationFrame;
-    (globalThis as any).requestAnimationFrame = (cb: FrameRequestCallback) => {
-      cb(0);
-      return 0;
-    };
-    try {
-      const ctx = shortcutsGet!();
-      // Path resolves to <jx-widget>, which is not an editable block — no edit session starts.
-      expect(() => ctx.enterEditOnPath(["children", 0])).not.toThrow();
-      expect(view.componentInlineEdit).toBeNull();
-    } finally {
-      globalThis.requestAnimationFrame = origRaf;
-      canvasPanels.length = 0;
-    }
   });
 });
 
@@ -849,5 +849,15 @@ describe("autosave", () => {
     await captured!();
     expect(write).not.toHaveBeenCalled();
     expect(tab.doc.dirty).toBe(true);
+  });
+});
+
+describe("parent-chrome commit guard", () => {
+  test("a chrome pointerdown with no live edit session is a harmless no-op", () => {
+    // The capture-phase guard registered at init runs on every parent pointerdown; without an
+    // Active edit host (getEditSnapshot().editing false) it must short-circuit silently.
+    expect(() =>
+      document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })),
+    ).not.toThrow();
   });
 });

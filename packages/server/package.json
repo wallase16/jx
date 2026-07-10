@@ -1,6 +1,6 @@
 {
   "name": "@jxsuite/server",
-  "version": "0.28.5",
+  "version": "0.37.1",
   "description": "Jx development server with live reload, server-side proxy, and studio integration",
   "license": "MIT",
   "repository": {
@@ -14,7 +14,11 @@
   "type": "module",
   "exports": {
     ".": "./src/server.ts",
-    "./claude-session": "./src/claude-session.ts",
+    "./ai-api": "./src/ai-api.ts",
+    "./import-api": "./src/import-api.ts",
+    "./packages": "./src/packages.ts",
+    "./project-server": "./src/project-server.ts",
+    "./refactor": "./src/refactor/index.ts",
     "./resolve": "./src/resolve.ts",
     "./types": "./src/types.ts"
   },
@@ -27,14 +31,14 @@
     "test:coverage": "bun test --isolate --coverage"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.175",
-    "@anthropic-ai/sdk": "^0.104.1",
+    "@jxsuite/collab": "workspace:^",
     "@jxsuite/compiler": "workspace:^",
     "@jxsuite/create": "workspace:^",
+    "@jxsuite/import": "workspace:^",
     "@jxsuite/parser": "workspace:^",
     "@jxsuite/runtime": "workspace:^",
     "@jxsuite/schema": "workspace:^",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@jxsuite/starters": "workspace:^",
     "chokidar": "^5.0.0",
     "zod": "^4.4.3"
   }

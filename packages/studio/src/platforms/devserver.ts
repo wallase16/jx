@@ -8,6 +8,35 @@
  * See spec/desktop.md §8 for the full specification.
  */
 
+import { streamImport } from "../services/import-client";
+import type { WsCollabConnection } from "@jxsuite/collab/client";
+import type { ProjectConfig } from "@jxsuite/schema/types";
+import type {
+  DirEntry,
+  FsEvent,
+  ImportProgressEvent,
+  ImportSiteOptions,
+  RenameResult,
+  StarterInfo,
+} from "../types";
+
+/** A directory entry from the server, tolerating extra wire fields. */
+type WireDirEntry = DirEntry & Record<string, unknown>;
+
+/** Parse a fetch Response body as JSON, asserting the expected shape at the boundary. */
+async function readJson<T>(res: Response): Promise<T> {
+  return (await res.json()) as T;
+}
+
+interface ErrorBody {
+  error?: string;
+}
+
+interface SiteEntry {
+  config: unknown;
+  path: string;
+}
+
 /**
  * Create a DevServerPlatform instance.
  *
@@ -18,6 +47,13 @@
  */
 export function createDevServerPlatform() {
   let _projectRoot = "";
+  /** Lazy /__studio/collab capability probe (null = not asked yet). */
+  let _collabProbe: Promise<boolean> | null = null;
+  /**
+   * One multiplexed collab socket per page; per-doc handles come from openDoc. Memoized as a
+   * promise so concurrent first opens share the connection instead of racing two sockets.
+   */
+  let _collabConnection: Promise<WsCollabConnection> | null = null;
 
   /**
    * Prefix a project-relative path with the active project root for server API calls.
@@ -58,7 +94,7 @@ export function createDevServerPlatform() {
     set projectRoot(v) {
       _projectRoot = v || "";
       if (_projectRoot) {
-        this.activate(_projectRoot);
+        void this.activate(_projectRoot);
       }
     },
 
@@ -109,19 +145,16 @@ export function createDevServerPlatform() {
       }
 
       const file = await siteHandle.getFile();
-      const config = JSON.parse(await file.text());
+      const config = JSON.parse(await file.text()) as ProjectConfig;
 
       // Resolve server-relative path by matching against known sites
       const sitesRes = await fetch("/__studio/sites");
       if (!sitesRes.ok) {
         throw new Error("Failed to fetch site list from server");
       }
-      const sites = await sitesRes.json();
+      const sites = await readJson<SiteEntry[]>(sitesRes);
       const match = sites.find(
-        /** @param {{ config: unknown; path: string }} s */ (s: {
-          config: unknown;
-          path: string;
-        }) => JSON.stringify(s.config) === JSON.stringify(config),
+        (s: SiteEntry) => JSON.stringify(s.config) === JSON.stringify(config),
       );
 
       if (!match) {
@@ -132,7 +165,7 @@ export function createDevServerPlatform() {
         if (!findRes.ok) {
           throw new Error("Could not locate project on disk");
         }
-        const found = await findRes.json();
+        const found = await readJson<{ path?: string }>(findRes);
         if (!found.path) {
           throw new Error(`Could not find project directory "${dirHandle.name}"`);
         }
@@ -147,7 +180,7 @@ export function createDevServerPlatform() {
       return {
         config,
         handle: {
-          name: config.name || _projectRoot.split("/").pop(),
+          name: config.name || _projectRoot.split("/").pop()!,
           projectConfig: config,
           root: _projectRoot,
         },
@@ -164,8 +197,17 @@ export function createDevServerPlatform() {
           fetch("/__studio/project"),
           fetch("/__studio/project-info?dir=."),
         ]);
-        const meta = projectRes.ok ? await projectRes.json() : { name: "project", root: "." };
-        const info = infoRes.ok ? await infoRes.json() : { isSiteProject: false };
+        const meta = projectRes.ok
+          ? await readJson<{ name: string; root: string }>(projectRes)
+          : { name: "project", root: "." };
+        const info = infoRes.ok
+          ? await readJson<{
+              isSiteProject: boolean;
+              projectConfig?: ProjectConfig | null;
+              directories?: string[];
+              [key: string]: unknown;
+            }>(infoRes)
+          : { isSiteProject: false };
         return { info, meta };
       } catch {
         return null;
@@ -189,6 +231,9 @@ export function createDevServerPlatform() {
       url?: string;
       adapter?: string;
       directory: string;
+      starter?: string;
+      template?: string;
+      design?: Record<string, unknown>;
     }) {
       const res = await fetch("/__studio/create-project", {
         body: JSON.stringify(opts),
@@ -196,10 +241,28 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const data = await res.json();
+        const data = await readJson<ErrorBody>(res);
         throw new Error(data.error || "Failed to create project");
       }
       return await res.json();
+    },
+
+    /** List starter templates from the dev server. */
+    async listStarters(): Promise<StarterInfo[]> {
+      const res = await fetch("/__studio/starters");
+      if (!res.ok) {
+        throw new Error("Failed to load starters");
+      }
+      return await readJson<StarterInfo[]>(res);
+    },
+
+    /** AI-guided site import: NDJSON progress stream from the dev server's import endpoint. */
+    async importSite(
+      opts: ImportSiteOptions,
+      onProgress: (evt: ImportProgressEvent) => void,
+      signal?: AbortSignal,
+    ) {
+      return await streamImport("/__studio/import-site", opts, onProgress, signal);
     },
 
     // ─── File operations ──────────────────────────────────────────────────
@@ -210,7 +273,7 @@ export function createDevServerPlatform() {
       if (!res.ok) {
         throw new Error(`Failed to list directory: ${dir}`);
       }
-      const entries = await res.json();
+      const entries = await readJson<WireDirEntry[]>(res);
       for (const e of entries) {
         e.path = stripRoot(e.path);
       }
@@ -223,7 +286,7 @@ export function createDevServerPlatform() {
       if (!res.ok) {
         throw new Error(`Failed to read file: ${path}`);
       }
-      const data = await res.json();
+      const data = await readJson<{ content: string }>(res);
       return data.content;
     },
 
@@ -272,7 +335,7 @@ export function createDevServerPlatform() {
      * @param {string} from
      * @param {string} to
      */
-    async renameFile(from: string, to: string) {
+    async renameFile(from: string, to: string): Promise<RenameResult> {
       const res = await fetch("/__studio/file/rename", {
         body: JSON.stringify({ from: serverPath(from), to: serverPath(to) }),
         headers: { "Content-Type": "application/json" },
@@ -281,6 +344,87 @@ export function createDevServerPlatform() {
       if (!res.ok) {
         throw new Error(`Failed to rename: ${from} → ${to}`);
       }
+      const report = await readJson<RenameResult>(res);
+      // Map server-root-relative report paths back to project-relative for the studio.
+      if (typeof report.from === "string") {
+        report.from = stripRoot(report.from);
+      }
+      if (typeof report.to === "string") {
+        report.to = stripRoot(report.to);
+      }
+      for (const f of report.references?.files ?? []) {
+        f.path = stripRoot(f.path);
+      }
+      for (const e of report.errors ?? []) {
+        e.path = stripRoot(e.path);
+      }
+      return report;
+    },
+
+    /**
+     * Subscribe to filesystem change events over the dev server's SSE stream. Listens for the named
+     * "fs" event (the preview iframe's default `onmessage` ignores it), strips paths to
+     * project-relative, and drops events for sibling projects outside the active root.
+     */
+    subscribeFileEvents(handler: (events: FsEvent[]) => void) {
+      if (typeof EventSource === "undefined") {
+        return () => {};
+      }
+      const es = new EventSource("/__reload");
+      es.addEventListener("fs", (ev: MessageEvent) => {
+        let payload: { events?: FsEvent[] };
+        try {
+          payload = JSON.parse(ev.data as string) as { events?: FsEvent[] };
+        } catch {
+          return;
+        }
+        const events: FsEvent[] = [];
+        for (const e of payload.events ?? []) {
+          const raw = e.path.replaceAll("\\", "/");
+          if (_projectRoot && raw !== _projectRoot && !raw.startsWith(`${_projectRoot}/`)) {
+            continue;
+          }
+          const path = stripRoot(raw);
+          if (path && !path.startsWith("..")) {
+            events.push({ isDir: e.isDir, path, type: e.type });
+          }
+        }
+        if (events.length > 0) {
+          handler(events);
+        }
+      });
+      return () => {
+        es.close();
+      };
+    },
+
+    /**
+     * Realtime co-editing over the dev server's /__studio/collab endpoint (rooms keyed by
+     * server-root-relative path). Probes capability once — older servers without the endpoint
+     * degrade to solo editing; the wire client's evaluation defers behind the dynamic import until
+     * a doc opens.
+     */
+    async collab(docPath: string) {
+      if (typeof WebSocket === "undefined" || typeof location === "undefined") {
+        return null;
+      }
+      if (_collabProbe === null) {
+        _collabProbe = fetch("/__studio/collab")
+          .then((res) => res.ok)
+          .catch(() => false);
+      }
+      if (!(await _collabProbe)) {
+        return null;
+      }
+      _collabConnection ??= (async () => {
+        const { createWsCollabConnection } = await import("@jxsuite/collab/client");
+        const scheme = location.protocol === "https:" ? "wss" : "ws";
+        return createWsCollabConnection({
+          url: `${scheme}://${location.host}/__studio/collab`,
+        });
+      })();
+      const connection = await _collabConnection;
+      return connection.openDoc(serverPath(docPath));
     },
 
     /** @param {string} _path */
@@ -343,6 +487,44 @@ export function createDevServerPlatform() {
       return await res.json();
     },
 
+    async installDependencies() {
+      const res = await fetch("/__studio/packages/install", { method: "POST" });
+      if (!res.ok) {
+        return { log: await res.text(), ok: false };
+      }
+      return await res.json();
+    },
+
+    async dependenciesNeedInstall() {
+      const res = await fetch("/__studio/packages/needs-install");
+      if (!res.ok) {
+        return false;
+      }
+      const data = (await res.json()) as { needsInstall?: boolean };
+      return Boolean(data.needsInstall);
+    },
+
+    async outdatedPackages() {
+      const res = await fetch("/__studio/packages/outdated");
+      if (!res.ok) {
+        return [];
+      }
+      return await res.json();
+    },
+
+    /** @param {{ name: string; version: string; dev?: boolean }[]} updates */
+    async setPackageVersions(updates: { name: string; version: string; dev?: boolean }[]) {
+      const res = await fetch("/__studio/packages/set-versions", {
+        body: JSON.stringify({ updates }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      if (!res.ok) {
+        return { log: await res.text(), ok: false };
+      }
+      return await res.json();
+    },
+
     // ─── Code services (optional) ─────────────────────────────────────────
 
     /**
@@ -392,7 +574,7 @@ export function createDevServerPlatform() {
           method: "POST",
         });
         if (res.ok) {
-          const body = await res.json();
+          const body = await readJson<{ path?: string }>(res);
           return body.path || null;
         }
       } catch {}
@@ -412,7 +594,7 @@ export function createDevServerPlatform() {
       if (!res.ok) {
         return [];
       }
-      const entries = await res.json();
+      const entries = await readJson<WireDirEntry[]>(res);
       for (const e of entries) {
         e.path = stripRoot(e.path);
       }
@@ -427,7 +609,7 @@ export function createDevServerPlatform() {
       if (!res.ok) {
         return [];
       }
-      const body = await res.json();
+      const body = await readJson<{ formats?: unknown[] }>(res);
       return body.formats ?? [];
     },
 
@@ -442,7 +624,7 @@ export function createDevServerPlatform() {
         headers: { "Content-Type": "application/json" },
         method: "POST",
       });
-      const data = await res.json();
+      const data = await readJson<{ error?: string; result?: unknown }>(res);
       if (!res.ok) {
         throw new Error(data.error || "Format action failed");
       }
@@ -468,8 +650,23 @@ export function createDevServerPlatform() {
       if (!res.ok) {
         return null;
       }
-      const { schema } = await res.json();
+      const { schema } = await readJson<{ schema: unknown }>(res);
       return schema;
+    },
+
+    // ─── Class resolution (dev-proxy) ─────────────────────────────────────
+
+    /** @param {Record<string, unknown>} body */
+    async resolveClass(body: Record<string, unknown>) {
+      const res = await fetch("/__jx_resolve__", {
+        body: JSON.stringify(body),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      if (!res.ok) {
+        throw new Error(`Class resolution failed: ${res.status}`);
+      }
+      return await readJson<unknown>(res);
     },
 
     // ─── Git operations ──────────────────────────────────────────────────
@@ -508,7 +705,7 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -522,7 +719,7 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -536,7 +733,7 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -550,7 +747,7 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -559,7 +756,7 @@ export function createDevServerPlatform() {
     async gitPull() {
       const res = await fetch("/__studio/git/pull", { method: "POST" });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -568,7 +765,7 @@ export function createDevServerPlatform() {
     async gitFetch() {
       const res = await fetch("/__studio/git/fetch", { method: "POST" });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -582,7 +779,7 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -596,7 +793,7 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -621,7 +818,7 @@ export function createDevServerPlatform() {
       if (!res.ok) {
         throw new Error(await res.text());
       }
-      const data = await res.json();
+      const data = await readJson<{ content: string }>(res);
       return data.content;
     },
 
@@ -633,7 +830,7 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -647,7 +844,7 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
       return await res.json();
@@ -656,7 +853,7 @@ export function createDevServerPlatform() {
     async gitInit() {
       const res = await fetch("/__studio/git/init", { method: "POST" });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
     },
@@ -672,59 +869,85 @@ export function createDevServerPlatform() {
         method: "POST",
       });
       if (!res.ok) {
-        const body = await res.json();
+        const body = await readJson<ErrorBody>(res);
         throw new Error(body.error);
       }
     },
 
-    // ─── AI Assistant ───────────────────────────────────
+    // ─── Cloudflare publish surface (token-backed; see services/cf-settings) ─
 
-    async aiAuthStatus() {
-      const res = await fetch("/__studio/ai/auth-status");
-      return await res.json();
-    },
-
-    /** @param {{ message: string; systemPrompt?: string }} opts */
-    async aiCreateSession(opts: { message: string; systemPrompt?: string }) {
-      const res = await fetch("/__studio/ai/session", {
-        body: JSON.stringify(opts),
-        headers: { "Content-Type": "application/json" },
+    /**
+     * Allowlisted Cloudflare API passthrough. The token comes from the client's cf-settings store
+     * and rides in a header to the same-origin proxy (api.cloudflare.com is not CORS-enabled).
+     */
+    async cfApi(apiPath: string, init?: { method?: string; body?: unknown }) {
+      const { getCfToken } = await import("../services/cf-settings");
+      const token = getCfToken();
+      if (!token) {
+        throw new Error("No Cloudflare API token configured");
+      }
+      const res = await fetch("/__studio/cf/proxy", {
         method: "POST",
+        headers: { "Content-Type": "application/json", "X-CF-Token": token },
+        body: JSON.stringify({ path: apiPath, method: init?.method ?? "GET", body: init?.body }),
       });
-      if (!res.ok) {
-        const body = await res.json();
-        throw new Error(body.error);
+      const envelope = (await res.json()) as {
+        success?: boolean;
+        result?: unknown;
+        errors?: { message: string }[];
+        error?: string;
+      };
+      if (!res.ok || envelope.success === false) {
+        const message =
+          envelope.errors?.map((e) => e.message).join("; ") ?? envelope.error ?? res.statusText;
+        throw new Error(`Cloudflare API: ${message}`);
       }
-      return await res.json();
+      return envelope.result ?? envelope;
     },
 
-    /** @param {string} id @param {string} message */
-    async aiSendMessage(id: string, message: string) {
-      const res = await fetch(`/__studio/ai/session/${id}/message`, {
-        body: JSON.stringify({ message }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
+    /** Verify the stored token by listing accounts; null when none/invalid. */
+    async cfConnection() {
+      const { getCfAccountId, getCfToken, setCfAccountId } =
+        await import("../services/cf-settings");
+      if (!getCfToken()) {
+        return null;
+      }
+      try {
+        const accounts = (await this.cfApi?.("/accounts")) as { id: string; name: string }[];
+        if (!accounts?.length) {
+          return { connected: false };
+        }
+        const chosen = accounts.find((a) => a.id === getCfAccountId()) ?? accounts[0]!;
+        setCfAccountId(chosen.id);
+        return { connected: true, accountId: chosen.id, accountName: chosen.name };
+      } catch {
+        return { connected: false };
+      }
+    },
+
+    // ─── Project catalogue ──────────────────────────────────────────────────
+
+    /** Every site under the server root, from the /__studio/sites glob. */
+    async listProjects() {
+      const res = await fetch("/__studio/sites");
+      if (!res.ok) {
+        return [];
+      }
+      const sites = await readJson<SiteEntry[]>(res);
+      return sites.map((site) => {
+        const config = site.config as { name?: string } | null;
+        return {
+          name: config?.name || site.path.split("/").at(-1) || site.path,
+          root: site.path,
+          description: site.path,
+        };
       });
-      if (!res.ok) {
-        const body = await res.json();
-        throw new Error(body.error);
-      }
-      return await res.json();
     },
 
-    /** @param {string} id */
-    aiStreamUrl(id: string) {
-      return `/__studio/ai/session/${id}/stream`;
-    },
+    // ─── AI Assistant (Stack B: OpenAI-compatible SSE proxy) ───────────────────
 
-    /** @param {string} id */
-    async aiStopSession(id: string) {
-      await fetch(`/__studio/ai/session/${id}/stop`, { method: "POST" });
-    },
-
-    /** @param {string} id */
-    async aiDeleteSession(id: string) {
-      await fetch(`/__studio/ai/session/${id}`, { method: "DELETE" });
+    aiChatUrl() {
+      return "/__studio/ai/chat";
     },
   };
 }

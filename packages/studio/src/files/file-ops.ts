@@ -10,8 +10,10 @@
 import { locateDocument } from "../services/code-services";
 import { errorMessage } from "@jxsuite/schema/parse";
 import { statusMessage } from "../panels/statusbar";
+import { validateComponentSlots } from "../services/cem-export";
 import { getPlatform } from "../platform";
 import { activeTab, openTab } from "../workspace/workspace";
+import { collabSave } from "../collab/collab-session";
 import { isEditing, stopEditing } from "../editor/inline-edit";
 import {
   defaultContentFormat,
@@ -94,7 +96,7 @@ export async function openFile() {
           sourceFormat: format.name,
         });
       } else if (name.endsWith(".json")) {
-        const document = JSON.parse(text);
+        const document = JSON.parse(text) as Record<string, unknown>;
         openTab({ document, documentPath, fileHandle: handle, id: name });
       } else {
         throw noFormatError(name);
@@ -108,8 +110,8 @@ export async function openFile() {
           showOpenFilePicker: (options?: unknown) => Promise<FileSystemFileHandle[]>;
         }
       ).showOpenFilePicker({ types: pickerTypes });
-      const file = await handle.getFile();
-      await handleSource(handle.name, await file.text(), handle);
+      const file = await handle!.getFile();
+      await handleSource(handle!.name, await file.text(), handle!);
     } else {
       // Fallback: file input
       const input = document.createElement("input");
@@ -131,6 +133,26 @@ export async function openFile() {
   }
 }
 
+/**
+ * Report a slot-validation warning for component documents (root tagName with a hyphen). The save
+ * still proceeds — the warning replaces the plain success message.
+ *
+ * @param {Tab} tab
+ * @param {string} savedMsg
+ */
+function savedMessage(tab: Tab, savedMsg: string) {
+  const doc = tab.doc.document;
+  const warning =
+    typeof doc.tagName === "string" && doc.tagName.includes("-")
+      ? validateComponentSlots(doc)
+      : null;
+  if (warning) {
+    statusMessage(`${savedMsg} — Warning: ${warning}`, 6000);
+  } else {
+    statusMessage(savedMsg);
+  }
+}
+
 /** Save the current document back to its source location. */
 export async function saveFile() {
   if (isEditing()) {
@@ -141,13 +163,18 @@ export async function saveFile() {
     return;
   }
   try {
+    // A co-edited tab persists through its provider (a direct file write would reset the room).
+    if (await collabSave(tab)) {
+      savedMessage(tab, "Synced");
+      return;
+    }
     const output = await serializeDocument(tab);
 
     if (tab.documentPath) {
       const platform = getPlatform();
       await platform.writeFile(tab.documentPath, output);
       tab.doc.dirty = false;
-      statusMessage("Saved");
+      savedMessage(tab, "Saved");
     } else if (tab.fileHandle && "createWritable" in tab.fileHandle) {
       const writable =
         await /**
@@ -161,7 +188,7 @@ export async function saveFile() {
       await writable.write(output);
       await writable.close();
       tab.doc.dirty = false;
-      statusMessage("Saved");
+      savedMessage(tab, "Saved");
     } else {
       statusMessage("No save target — use Export");
     }
@@ -209,7 +236,7 @@ export async function exportFile() {
       await writable.write(output);
       await writable.close();
       tab.doc.dirty = false;
-      statusMessage(`Exported as ${handle.name}`);
+      savedMessage(tab, `Exported as ${handle.name}`);
     } else {
       // Fallback: download
       const blob = new Blob([output], { type: mimeType });
@@ -220,7 +247,7 @@ export async function exportFile() {
       a.click();
       URL.revokeObjectURL(url);
       tab.doc.dirty = false;
-      statusMessage("Downloaded");
+      savedMessage(tab, "Downloaded");
     }
   } catch (error) {
     if (!(error instanceof Error && error.name === "AbortError")) {

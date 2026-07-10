@@ -8,7 +8,10 @@
 import { html, nothing } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
 import { ifDefined } from "lit-html/directives/if-defined.js";
+import { live } from "lit-html/directives/live.js";
 import { styleMap } from "lit-html/directives/style-map.js";
+import { isRef } from "@jxsuite/schema/guards";
+import { dynamicRouteParams } from "../page-params";
 import { projectState } from "../state";
 import type { JsonValue } from "../types";
 import { activeTab } from "../workspace/workspace";
@@ -110,6 +113,14 @@ let expandedSignal: string | null = null;
 
 /** Track which functions have the advanced param editor open. */
 const advancedParamOpen = new Set();
+
+/** Schema fields whose binding picker is in free-form Custom mode (cleared on commit). */
+const bindingCustomOpen = new Set<string>();
+
+/** Reset binding-control ephemeral UI state (test hook). */
+export function resetBindingUiState() {
+  bindingCustomOpen.clear();
+}
 
 /** Default templates for creating new signal definitions. */
 const DEF_TEMPLATES = {
@@ -214,7 +225,7 @@ export function defBadgeLabel(def: SignalDef | unknown) {
  * @param {string} name
  * @param {SignalDef | null | undefined} def
  */
-export function defHint(name: string, def: SignalDef | null | undefined) {
+export function defHint(_name: string, def: SignalDef | null | undefined) {
   if (!def) {
     return "";
   }
@@ -413,15 +424,15 @@ export function renderSignalsTemplate(S: SignalsPanelState, ctx: SignalsPanelCtx
     state: [],
   } as Record<string, [string, SignalDef][]>;
   for (const [name, def] of entries) {
-    groups[defCategory(def)].push([name, asSignalDef(def)]);
+    groups[defCategory(def)]!.push([name, asSignalDef(def)]);
   }
 
   const categories = [
-    { items: groups.state, key: "state", label: "State" },
-    { items: groups.computed, key: "computed", label: "Computed" },
-    { items: groups.data, key: "data", label: "Data" },
-    { items: groups.expression, key: "expression", label: "Expressions" },
-    { items: groups.function, key: "function", label: "Functions" },
+    { items: groups.state!, key: "state", label: "State" },
+    { items: groups.computed!, key: "computed", label: "Computed" },
+    { items: groups.data!, key: "data", label: "Data" },
+    { items: groups.expression!, key: "expression", label: "Expressions" },
+    { items: groups.function!, key: "function", label: "Functions" },
   ];
 
   const collapsedCats = (S._collapsedSignalCats ||= new Set());
@@ -515,7 +526,7 @@ export function renderSignalsTemplate(S: SignalsPanelState, ctx: SignalsPanelCtx
               );
               expandedSignal = n;
               if (src) {
-                fetchPluginSchema(
+                void fetchPluginSchema(
                   { $prototype: protoName, $src: src },
                   {
                     ...(S.documentPath != null && {
@@ -706,9 +717,9 @@ function renderSignalEditorTemplate(
         : signalFieldRow("Default", defaultVal, (v: string) => {
             let parsed: unknown = v;
             if (def.type === "integer") {
-              parsed = Number.parseInt(v, 10) || 0;
+              parsed = Math.trunc(Number(v)) || 0;
             } else if (def.type === "number") {
-              parsed = Number.parseFloat(v) || 0;
+              parsed = Number(v) || 0;
             } else if (def.type === "boolean") {
               parsed = v === "true";
             } else if (def.type === "array" || def.type === "object") {
@@ -860,7 +871,7 @@ function renderDataSourceFields(
       )}
       ${signalFieldRow("Version", String(def.version || 1), (v: string) =>
         transactDoc(activeTab.value, (t) =>
-          mutateUpdateDef(t, name, { version: Number.parseInt(v, 10) || 1 }),
+          mutateUpdateDef(t, name, { version: Math.trunc(Number(v)) || 1 }),
         ),
       )}
     `;
@@ -887,7 +898,7 @@ function renderDataSourceFields(
     return textareaRow(fieldLabel, defaultStr, (v: string) => {
       try {
         transactDoc(activeTab.value, (t) =>
-          mutateUpdateDef(t, name, { [fieldName]: JSON.parse(v) }),
+          mutateUpdateDef(t, name, { [fieldName]: JSON.parse(v) as unknown }),
         );
       } catch {}
     });
@@ -901,7 +912,7 @@ function renderFunctionFields(
   S: SignalsPanelState,
   name: string,
   def: SignalDef,
-  textareaRow: (
+  _textareaRow: (
     label: string,
     value: string,
     onChange: (value: string) => void,
@@ -943,7 +954,7 @@ function renderFunctionFields(
         </div>
         <textarea
           class="field-input"
-          style="min-height:60px;font-family:monospace;font-size:11px"
+          style="min-height:60px;font-family:var(--font-mono);font-size:var(--spectrum-font-size-50, 11px)"
           .value=${def.body || ""}
           @input=${(e: Event) => {
             const v = (e.target as HTMLInputElement).value;
@@ -962,7 +973,7 @@ function renderFunctionFields(
 
 /** Render CEM parameter editor with basic/advanced toggle. */
 function renderParameterEditorTemplate(
-  S: SignalsPanelState,
+  _S: SignalsPanelState,
   name: string,
   def: SignalDef,
   ctx: SignalsPanelCtx,
@@ -981,7 +992,7 @@ function renderParameterEditorTemplate(
           ${params.map(
             (p: CemParameter, i: number) => html`
               <span
-                style="display:inline-flex;align-items:center;gap:2px;padding:1px 6px;border-radius:3px;background:var(--bg-hover);font-size:11px;font-family:monospace"
+                style="display:inline-flex;align-items:center;gap:2px;padding:1px 6px;border-radius:var(--radius);background:var(--hover-bg);font-size:var(--spectrum-font-size-50, 11px);font-family:var(--font-mono)"
               >
                 ${p.name || "?"}
                 <span
@@ -1002,7 +1013,7 @@ function renderParameterEditorTemplate(
           )}
           <input
             class="field-input"
-            style="width:60px;flex:0 0 auto;font-size:11px"
+            style="width:60px;flex:0 0 auto;font-size:var(--spectrum-font-size-50, 11px)"
             placeholder="+"
             @keydown=${(e: KeyboardEvent) => {
               if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
@@ -1061,7 +1072,7 @@ function renderParameterEditorTemplate(
                 @change=${(e: Event) => {
                   const next = [...params];
                   const val = (e.target as HTMLInputElement).value;
-                  const { type: _t, ...rest } = next[i];
+                  const { type: _t, ...rest } = next[i]!;
                   next[i] = val ? { ...rest, type: { text: val } } : rest;
                   transactDoc(activeTab.value, (t) =>
                     mutateUpdateDef(t, name, { parameters: next }),
@@ -1076,7 +1087,7 @@ function renderParameterEditorTemplate(
                 @change=${(e: Event) => {
                   const next = [...params];
                   const val = (e.target as HTMLInputElement).value;
-                  const { description: _d, ...rest } = next[i];
+                  const { description: _d, ...rest } = next[i]!;
                   next[i] = val ? { ...rest, description: val } : rest;
                   transactDoc(activeTab.value, (t) =>
                     mutateUpdateDef(t, name, { parameters: next }),
@@ -1090,7 +1101,7 @@ function renderParameterEditorTemplate(
                 @change=${(e: Event) => {
                   const next = [...params];
                   const { checked } = e.target as HTMLInputElement;
-                  const { optional: _o, ...rest } = next[i];
+                  const { optional: _o, ...rest } = next[i]!;
                   next[i] = checked ? { ...rest, optional: true } : rest;
                   transactDoc(activeTab.value, (t) =>
                     mutateUpdateDef(t, name, { parameters: next }),
@@ -1145,7 +1156,7 @@ function renderEmitsEditorTemplate(S: SignalsPanelState, name: string, def: Sign
 
   return html`
     <div
-      style="font-size:11px;font-weight:600;color:var(--fg-dim);margin:8px 0 4px;text-transform:uppercase;letter-spacing:0.05em"
+      style="font-size:var(--spectrum-font-size-50, 11px);font-weight:600;color:var(--fg-dim);margin:8px 0 4px;text-transform:uppercase;letter-spacing:0.05em"
     >
       Emits
     </div>
@@ -1174,7 +1185,7 @@ function renderEmitsEditorTemplate(S: SignalsPanelState, name: string, def: Sign
             @change=${(e: Event) => {
               const next = [...emits];
               const val = (e.target as HTMLInputElement).value;
-              const { type: _t, ...rest } = next[i];
+              const { type: _t, ...rest } = next[i]!;
               next[i] = val ? { ...rest, type: { text: val } } : rest;
               transactDoc(activeTab.value, (t) => mutateUpdateDef(t, name, { emits: next }));
             }}
@@ -1187,7 +1198,7 @@ function renderEmitsEditorTemplate(S: SignalsPanelState, name: string, def: Sign
             @change=${(e: Event) => {
               const next = [...emits];
               const val = (e.target as HTMLInputElement).value;
-              const { description: _d, ...rest } = next[i];
+              const { description: _d, ...rest } = next[i]!;
               next[i] = val ? { ...rest, description: val } : rest;
               transactDoc(activeTab.value, (t) => mutateUpdateDef(t, name, { emits: next }));
             }}
@@ -1248,7 +1259,7 @@ function resolveSchemaEnum(
       const match = ref.match(/#\/\$context\/contentTypes\/\{@(\w+)\}\/schema\/properties/);
       if (match && parentDef) {
         const [, paramName] = match;
-        const typeName = parentDef[paramName] as string | undefined;
+        const typeName = parentDef[paramName!] as string | undefined;
         if (typeName) {
           const ct = projectState?.projectConfig?.contentTypes?.[typeName] as
             | Record<string, unknown>
@@ -1279,6 +1290,14 @@ function resolveSchemaEnum(
  * @param {(val: unknown) => void} onChange
  * @param {Record<string, unknown>} [parentDef] - Parent def for resolving dependent enum refs
  */
+/** Parse a numeric field value, returning NaN for blank input (so callers can treat it as unset). */
+function parseNumericField(raw: string, integer: boolean): number {
+  if (raw.trim() === "") {
+    return Number.NaN;
+  }
+  return integer ? Math.trunc(Number(raw)) : Number(raw);
+}
+
 function renderInlineField(
   key: string,
   schema: Record<string, unknown>,
@@ -1286,6 +1305,18 @@ function renderInlineField(
   onChange: (val: unknown) => void,
   parentDef?: Record<string, unknown>,
 ) {
+  if (isRef(value)) {
+    return html`<sp-textfield
+      size="s"
+      label=${key}
+      placeholder=${key}
+      .value=${live(value.$ref)}
+      @change=${(e: Event) => {
+        const v = (e.target as HTMLInputElement).value.trim();
+        onChange(v ? { $ref: v } : undefined);
+      }}
+    ></sp-textfield>`;
+  }
   const enumValues = resolveSchemaEnum(schema.enum, parentDef);
 
   if (enumValues) {
@@ -1319,10 +1350,10 @@ function renderInlineField(
       .value=${value !== undefined ? value : nothing}
       step=${schema.type === "integer" ? "1" : nothing}
       @change=${(e: Event) => {
-        const parsed =
-          schema.type === "integer"
-            ? Number.parseInt((e.target as HTMLInputElement).value, 10)
-            : Number.parseFloat((e.target as HTMLInputElement).value);
+        const parsed = parseNumericField(
+          (e.target as HTMLInputElement).value,
+          schema.type === "integer",
+        );
         onChange(Number.isNaN(parsed) ? undefined : parsed);
       }}
     ></sp-number-field>`;
@@ -1334,6 +1365,63 @@ function renderInlineField(
     .value=${value ?? ""}
     @input=${(e: Event) => onChange((e.target as HTMLInputElement).value || undefined)}
   ></sp-textfield>`;
+}
+
+/**
+ * Render a binding picker for a `{ $ref }` config value — route params derived from the document
+ * path plus a free-form custom ref, with a switch back to a static value.
+ */
+function renderBindingControl(opts: {
+  refVal: string;
+  params: string[];
+  fieldKey: string;
+  commit: (next: { $ref: string } | undefined) => void;
+  rerender: (() => void) | undefined;
+}) {
+  const paramRefs = opts.params.map((p) => `#/$params/${p}`);
+  const isCustom =
+    bindingCustomOpen.has(opts.fieldKey) ||
+    (opts.refVal !== "" && !paramRefs.includes(opts.refVal));
+  return html`
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <sp-picker
+        size="s"
+        .value=${live(isCustom ? "__custom__" : opts.refVal || "__static__")}
+        @change=${(e: Event) => {
+          const v = (e.target as HTMLInputElement).value;
+          if (v === "__custom__") {
+            bindingCustomOpen.add(opts.fieldKey);
+            opts.rerender?.();
+            return;
+          }
+          bindingCustomOpen.delete(opts.fieldKey);
+          opts.commit(v === "__static__" ? undefined : { $ref: v });
+          opts.rerender?.();
+        }}
+      >
+        <sp-menu-item value="__static__">Static value</sp-menu-item>
+        ${paramRefs.length > 0 ? html`<sp-menu-divider></sp-menu-divider>` : nothing}
+        ${paramRefs.map((r) => html`<sp-menu-item value=${r}>${r.slice(2)}</sp-menu-item>`)}
+        <sp-menu-divider></sp-menu-divider>
+        <sp-menu-item value="__custom__">Custom…</sp-menu-item>
+      </sp-picker>
+      ${isCustom
+        ? html`<sp-textfield
+            size="s"
+            placeholder="#/$params/…"
+            .value=${live(opts.refVal)}
+            @change=${(e: Event) => {
+              const v = (e.target as HTMLInputElement).value.trim();
+              if (!v) {
+                bindingCustomOpen.delete(opts.fieldKey);
+              }
+              opts.commit(v ? { $ref: v } : undefined);
+              opts.rerender?.();
+            }}
+          ></sp-textfield>`
+        : nothing}
+    </div>
+  `;
 }
 
 /** Render a debounced multiline JSON text field for array/object schema properties. */
@@ -1357,7 +1445,7 @@ function renderJsonTextField(
         try {
           transactDoc(activeTab.value, (t) =>
             mutateUpdateDef(t, name, {
-              [prop]: JSON.parse((e.target as HTMLInputElement).value),
+              [prop]: JSON.parse((e.target as HTMLInputElement).value) as unknown,
             }),
           );
         } catch {}
@@ -1374,7 +1462,7 @@ export function renderSchemaFieldsTemplate(
   schema: JsonSchema | null | undefined,
   def: SignalDef,
   name: string,
-  _S: SignalsPanelState,
+  S: SignalsPanelState,
   ctx: SignalsPanelCtx | null = null,
 ) {
   if (!schema?.properties) {
@@ -1382,6 +1470,7 @@ export function renderSchemaFieldsTemplate(
   }
 
   const required = new Set(schema.required);
+  const params = dynamicRouteParams(S.documentPath);
 
   const propertyFields = Object.entries(schema.properties)
     .filter(([prop]) => !STUDIO_RESERVED_KEYS.has(prop))
@@ -1391,7 +1480,21 @@ export function renderSchemaFieldsTemplate(
 
       let control;
       const enumValues = resolveSchemaEnum(ps.enum, def);
-      if (enumValues) {
+      if (
+        isRef(currentValue) &&
+        ps.format !== "json-schema" &&
+        ps.type !== "object" &&
+        ps.type !== "array"
+      ) {
+        control = renderBindingControl({
+          refVal: currentValue.$ref,
+          params,
+          fieldKey: `${name}.${prop}`,
+          commit: (next) =>
+            transactDoc(activeTab.value, (t) => mutateUpdateDef(t, name, { [prop]: next })),
+          rerender: ctx ? () => ctx.renderLeftPanel() : undefined,
+        });
+      } else if (enumValues) {
         control = html`
           <sp-picker
             size="s"
@@ -1439,10 +1542,10 @@ export function renderSchemaFieldsTemplate(
           @change=${(e: Event) => {
             clearTimeout(debounce);
             debounce = setTimeout(() => {
-              const parsed =
-                ps.type === "integer"
-                  ? Number.parseInt((e.target as HTMLInputElement).value, 10)
-                  : Number.parseFloat((e.target as HTMLInputElement).value);
+              const parsed = parseNumericField(
+                (e.target as HTMLInputElement).value,
+                ps.type === "integer",
+              );
               transactDoc(activeTab.value, (t) =>
                 mutateUpdateDef(t, name, {
                   [prop]: Number.isNaN(parsed) ? undefined : parsed,
@@ -1455,18 +1558,18 @@ export function renderSchemaFieldsTemplate(
         const hasValue =
           currentValue && typeof currentValue === "object" && Object.keys(currentValue).length > 0;
         const cv = currentValue as Record<string, unknown>;
-        const isRef = hasValue && cv.$ref;
+        const isSchemaRef = hasValue && cv.$ref;
         /** @type {ReturnType<typeof setTimeout> | undefined} */
         let debounce: ReturnType<typeof setTimeout> | undefined;
         control = html`
           <div class="schema-param-editor">
-            ${hasValue && !isRef && cv.properties
+            ${hasValue && !isSchemaRef && cv.properties
               ? html`
                   <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px">
                     ${Object.entries(cv.properties as Record<string, Record<string, unknown>>).map(
                       ([k, v]) => html`
                         <span
-                          style="background:var(--bg-alt);padding:1px 6px;border-radius:3px;font-size:10px;color:var(--fg-dim)"
+                          style="background:var(--bg);padding:1px 6px;border-radius:var(--radius);font-size:10px;color:var(--fg-dim)"
                           >${k}: ${v.type ?? "any"}</span
                         >
                       `,
@@ -1490,7 +1593,7 @@ export function renderSchemaFieldsTemplate(
                   try {
                     transactDoc(activeTab.value, (t) =>
                       mutateUpdateDef(t, name, {
-                        [prop]: JSON.parse((e.target as HTMLInputElement).value),
+                        [prop]: JSON.parse((e.target as HTMLInputElement).value) as unknown,
                       }),
                     );
                   } catch {}
@@ -1501,7 +1604,9 @@ export function renderSchemaFieldsTemplate(
         `;
       } else if (ps.type === "array" && ps.items?.type === "object" && ps.items?.properties) {
         // Array of objects with defined schema → multi-row inline form
-        const rows = Array.isArray(currentValue) ? currentValue : [];
+        const rows: Record<string, unknown>[] = Array.isArray(currentValue)
+          ? (currentValue as Record<string, unknown>[])
+          : [];
         const itemProps = ps.items.properties as Record<string, Record<string, unknown>>;
         control = html`
           <div class="array-object-field">
@@ -1570,24 +1675,43 @@ export function renderSchemaFieldsTemplate(
         /** @type {ReturnType<typeof setTimeout> | undefined} */
         let debounce: ReturnType<typeof setTimeout> | undefined;
         const ph = ps.default !== undefined ? String(ps.default) : (ps.examples?.[0] ?? "");
-        control = html`<sp-textfield
-          size="s"
-          .value=${currentValue ?? ""}
-          placeholder=${ph || nothing}
-          title=${ps.description || nothing}
-          @input=${(e: Event) => {
-            clearTimeout(debounce);
-            debounce = setTimeout(
-              () =>
-                transactDoc(activeTab.value, (t) =>
-                  mutateUpdateDef(t, name, {
-                    [prop]: (e.target as HTMLInputElement).value || undefined,
-                  }),
-                ),
-              400,
-            );
-          }}
-        ></sp-textfield>`;
+        control = html`<div style="display:flex;gap:4px;align-items:center">
+          <sp-textfield
+            size="s"
+            style="flex:1"
+            .value=${currentValue ?? ""}
+            placeholder=${ph || nothing}
+            title=${ps.description || nothing}
+            @input=${(e: Event) => {
+              clearTimeout(debounce);
+              debounce = setTimeout(
+                () =>
+                  transactDoc(activeTab.value, (t) =>
+                    mutateUpdateDef(t, name, {
+                      [prop]: (e.target as HTMLInputElement).value || undefined,
+                    }),
+                  ),
+                400,
+              );
+            }}
+          ></sp-textfield>
+          ${params.length > 0
+            ? html`<sp-action-button
+                quiet
+                size="s"
+                title="Bind to route param"
+                @click=${() => {
+                  transactDoc(activeTab.value, (t) =>
+                    mutateUpdateDef(t, name, {
+                      [prop]: { $ref: `#/$params/${params[0]}` },
+                    }),
+                  );
+                  ctx?.renderLeftPanel();
+                }}
+                ><sp-icon-link slot="icon"></sp-icon-link
+              ></sp-action-button>`
+            : nothing}
+        </div>`;
       }
 
       return renderFieldRow({
@@ -1626,17 +1750,17 @@ export function renderExternalPrototypeEditorTemplate(
           ${schema.description
             ? html`<div class="signal-hint" style="padding:4px 0 8px">${schema.description}</div>`
             : nothing}
-          ${renderSchemaFieldsTemplate(schema, def, name, S, ctx)}
+          ${renderSchemaFieldsTemplate(schema as JsonSchema, def, name, S, ctx)}
         `;
       }
     } else {
       // Trigger async load — will re-render when cached
       schemaContent = html`<div
-        style="padding:4px 0;font-size:11px;color:var(--fg-dim);font-style:italic"
+        style="padding:4px 0;font-size:var(--spectrum-font-size-50, 11px);color:var(--fg-dim);font-style:italic"
       >
         Loading schema…
       </div>`;
-      fetchPluginSchema(def, {
+      void fetchPluginSchema(def, {
         ...(S.documentPath != null && { documentPath: S.documentPath }),
       }).then((schema) => {
         if (schema) {
@@ -1648,7 +1772,10 @@ export function renderExternalPrototypeEditorTemplate(
 
   return html`
     ${importedPath
-      ? html`<div class="signal-hint" style="padding:4px 0 2px;font-size:11px;color:var(--fg-dim)">
+      ? html`<div
+          class="signal-hint"
+          style="padding:4px 0 2px;font-size:var(--spectrum-font-size-50, 11px);color:var(--fg-dim)"
+        >
           ${def.$prototype}
         </div>`
       : html`

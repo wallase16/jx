@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+// oxlint-disable typescript/await-thenable -- bun test .resolves/.rejects matchers are typed `void` but return real Promises at runtime; the await is required.
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 
 // ─── Embedded mock RPC server ──────────────────────────────────────────────
 
@@ -23,6 +24,13 @@ const responses: Record<string, unknown> = {
   gitStage: null,
   gitStatus: { ahead: 0, behind: 0, branch: "main", files: [] },
   gitUnstage: null,
+  getProjectRoot: { root: "/abs/proj" },
+  setWindowProject: { config: { name: "Test" }, deduped: false },
+  getRecentProjects: [{ name: "Recent", root: "/abs/recent", timestamp: 7 }],
+  getSettings: { aiApiKey: "sk-abc" },
+  pickDirectory: { path: "/picked/parent" },
+  saveRecentProjects: null,
+  saveSettings: null,
   listDirectory: [
     {
       modified: "2025-01-01",
@@ -33,6 +41,10 @@ const responses: Record<string, unknown> = {
     },
   ],
   listPackages: [{ name: "lodash", version: "^4.0.0" }],
+  dependenciesNeedInstall: true,
+  installDependencies: { ok: true },
+  outdatedPackages: [{ current: "^4.0.0", latest: "4.17.21", name: "lodash" }],
+  setPackageVersions: { ok: true },
   locateFile: "found/file.json",
   openProject: {
     config: { name: "Test" },
@@ -130,6 +142,15 @@ if (wsStr.includes("WebSocketImplementation") || wsStr.includes("DOMException"))
 
 // ─── Import after globals are set ──────────────────────────────────────────
 
+// The NDJSON stream client is exercised by studio's import-client tests; here only the plumbing
+// (endpoint token, directory resolution, callback threading) matters.
+const streamImportCalls: unknown[][] = [];
+const streamImport = mock((...args: unknown[]) => {
+  streamImportCalls.push(args);
+  return Promise.resolve({ config: { name: "Imported" }, root: "/imported" });
+});
+void mock.module("@jxsuite/studio/import-client", () => ({ streamImport }));
+
 const { createDesktopPlatform } = await import("../src/chromium/platform");
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -140,22 +161,141 @@ describe("chromium desktop platform", () => {
   beforeAll(() => {
     Object.defineProperty(globalThis, "location", {
       configurable: true,
-      value: { host: TEST_HOST, href: `http://${TEST_HOST}/` },
+      value: {
+        host: TEST_HOST,
+        href: `http://${TEST_HOST}/?token=CHROMIUM_TOK`,
+        search: "?token=CHROMIUM_TOK",
+      },
       writable: true,
     });
     platform = createDesktopPlatform();
   });
 
   afterAll(() => {
-    server.stop();
+    void server.stop();
   });
 
   test("has correct id", () => {
     expect(platform.id).toBe("desktop");
   });
 
+  test("canvasUrl carries the per-process rpcToken read from the shell URL", () => {
+    // The launcher passes the rpcToken as ?token= on the shell URL; the platform threads it onto
+    // The canvas iframe URL as ?rpcToken= so the in-iframe runtime's loopback fetches authenticate.
+    const url = new URL(platform.canvasUrl!, "http://x");
+    expect(url.pathname).toBe("/__studio__/canvas.html");
+    expect(url.searchParams.get("rpcToken")).toBe("CHROMIUM_TOK");
+  });
+
+  test("canvasUrl stays the bare path when no token is present (dev/token-less parity)", () => {
+    // Construct a platform under a token-less location; canvasUrl must be byte-identical to the
+    // Default so the dev server / token-less contexts are unaffected.
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: { host: TEST_HOST, href: `http://${TEST_HOST}/`, search: "" },
+      writable: true,
+    });
+    const tokenless = createDesktopPlatform();
+    expect(tokenless.canvasUrl).toBe("/__studio__/canvas.html");
+  });
+
   test("activate is a no-op", async () => {
     await expect(platform.activate()).resolves.toBeUndefined();
+  });
+
+  // ─── AI-guided site import ─────────────────────────────────────────────
+
+  test("pickDirectory returns the natively picked path", async () => {
+    await expect(platform.pickDirectory!()).resolves.toBe("/picked/parent");
+  });
+
+  test("importSite resolves a relative directory under a picked parent and streams via the tokened endpoint", async () => {
+    streamImportCalls.length = 0;
+    const onProgress = () => {};
+    const result = await platform.importSite!(
+      {
+        aiComponents: false,
+        depth: 1,
+        directory: "my-slug",
+        maxPages: 5,
+        name: "X",
+        url: "https://x.example",
+      },
+      onProgress,
+    );
+    expect(result).toEqual({ config: { name: "Imported" }, root: "/imported" } as never);
+    const [endpoint, opts, cb] = streamImportCalls[0]!;
+    expect(endpoint).toBe("/__studio__/import-site?token=CHROMIUM_TOK");
+    expect((opts as { directory: string }).directory).toBe("/picked/parent/my-slug");
+    expect(cb).toBe(onProgress);
+  });
+
+  test("importSite passes an absolute directory through without a dialog", async () => {
+    streamImportCalls.length = 0;
+    await platform.importSite!(
+      {
+        aiComponents: false,
+        depth: 0,
+        directory: "/abs/dest",
+        maxPages: 1,
+        name: "X",
+        url: "https://x.example",
+      },
+      () => {},
+    );
+    expect((streamImportCalls[0]![1] as { directory: string }).directory).toBe("/abs/dest");
+  });
+
+  test("importSite rejects when the directory picker is cancelled", async () => {
+    responses.pickDirectory = { path: null };
+    try {
+      await expect(
+        platform.importSite!(
+          {
+            aiComponents: false,
+            depth: 0,
+            directory: "slug",
+            maxPages: 1,
+            name: "X",
+            url: "https://x.example",
+          },
+          () => {},
+        ),
+      ).rejects.toThrow("No destination folder was selected.");
+    } finally {
+      responses.pickDirectory = { path: "/picked/parent" };
+    }
+  });
+
+  // ─── Class resolution ──────────────────────────────────────────────────
+
+  test("resolveClass POSTs to /__jx_resolve__ with the shell token", async () => {
+    // The project server 403s a token-less /__jx_resolve__; the platform must thread the token.
+    const originalFetch = globalThis.fetch;
+    const seen: { url: string; init?: RequestInit }[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({ init, url: String(input) });
+      return Response.json([{ data: { sku: "a" }, id: "A" }]);
+    }) as typeof fetch;
+    try {
+      const result = await platform.resolveClass!({ $src: "x" });
+      expect(result).toEqual([{ data: { sku: "a" }, id: "A" }]);
+      expect(seen[0]!.url).toBe("/__jx_resolve__?token=CHROMIUM_TOK");
+      expect(seen[0]!.init?.method).toBe("POST");
+      expect(seen[0]!.init?.body).toBe('{"$src":"x"}');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("resolveClass throws on a non-OK response", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("no", { status: 403 })) as typeof fetch;
+    try {
+      expect(platform.resolveClass!({ $src: "x" })).rejects.toThrow("Class resolution failed: 403");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   // ─── Project operations ────────────────────────────────────────────────
@@ -170,14 +310,40 @@ describe("chromium desktop platform", () => {
   test("probeRootProject reads project.json", async () => {
     const result = await platform.probeRootProject();
     expect(result!.info.isSiteProject).toBe(true);
+    // Absolute backend root is surfaced as the re-openable key.
+    expect(result!.meta.root).toBe("/abs/proj");
   });
 
-  test("probeRootProject returns fallback when readFile fails", async () => {
+  test("getProjectRoot returns the backend root", async () => {
+    const { root } = await platform.getProjectRoot!();
+    expect(root).toBe("/abs/proj");
+  });
+
+  test("setWindowProject rebinds in place and reports no dedup", async () => {
+    const res = await platform.setWindowProject!("/abs/proj");
+    expect(res.deduped).toBe(false);
+    expect(res.config).toEqual({ name: "Test" });
+  });
+
+  test("recent projects round-trip through the backend store", async () => {
+    const list = await platform.getRecentProjects!();
+    expect(list.map((p) => p.root)).toEqual(["/abs/recent"]);
+    await expect(platform.saveRecentProjects!(list)).resolves.toBeUndefined();
+  });
+
+  test("settings round-trip through the backend store", async () => {
+    const settings = await platform.getSettings!();
+    expect(settings).toEqual({ aiApiKey: "sk-abc" });
+    await expect(platform.saveSettings!(settings)).resolves.toBeUndefined();
+  });
+
+  test("probeRootProject returns null when readFile fails (no project → welcome screen)", async () => {
+    // The launcher's root defaults to the launch cwd; a missing project.json means "no project".
+    // A phantom non-site result here would set projectState and suppress the welcome screen for
+    // The whole session (the chromium never-shows-welcome regression).
     forcedErrors.set("readFile", "File not found");
     const result = await platform.probeRootProject();
-    expect(result!.info.isSiteProject).toBe(false);
-    expect(result!.info.projectConfig).toBeNull();
-    expect(result!.meta.name).toBe("project");
+    expect(result).toBeNull();
   });
 
   test("resolveSiteContext returns site path", async () => {
@@ -332,5 +498,21 @@ describe("chromium desktop platform", () => {
     const packages = await platform.listPackages();
     expect(packages).toHaveLength(1);
     expect(packages[0].name).toBe("lodash");
+  });
+
+  test("installDependencies / dependenciesNeedInstall resolve", async () => {
+    expect(await platform.installDependencies!()).toEqual({ ok: true });
+    expect(await platform.dependenciesNeedInstall!()).toBe(true);
+  });
+
+  test("outdatedPackages returns the outdated list", async () => {
+    const out = await platform.outdatedPackages!();
+    expect(out).toEqual([{ current: "^4.0.0", latest: "4.17.21", name: "lodash" }]);
+  });
+
+  test("setPackageVersions resolves", async () => {
+    expect(await platform.setPackageVersions!([{ name: "lodash", version: "^4.17.21" }])).toEqual({
+      ok: true,
+    });
   });
 });

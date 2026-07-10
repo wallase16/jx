@@ -1,213 +1,98 @@
-import Electrobun, { BrowserView, BrowserWindow, Screen } from "electrobun/bun";
-import type { StudioRPC } from "./rpc-schema";
+import Electrobun from "electrobun/bun";
+import { isAbsolute } from "node:path";
+import { setDirectoryDialog, setFileDialog } from "./project-session";
+import { setNotifyWebview, startBackgroundChecks } from "./updater";
+import { init as initUtils, openDirectoryDialog, openFileDialog } from "./utils";
+import { handleAiApi } from "@jxsuite/server/ai-api";
+import { handleImportApi } from "@jxsuite/server/import-api";
+import { installApplicationMenu } from "./menu";
 import {
-  codeService,
-  discoverComponents,
-  fetchPluginSchema,
-  formatAction,
-  handleCreateDirectory,
-  handleDeleteFile,
-  handleReadFile,
-  handleReadFileAsDataUrl,
-  handleRenameFile,
-  handleResolveSiteContext,
-  handleUploadFile,
-  handleWriteFile,
-  jxResolve,
-  jxServerFunction,
-  listDirectory,
-  listFormats,
-  locateFile,
-  openProject,
-  setFileDialog,
-  setProjectRoot,
-} from "./handlers";
-import {
-  gitAddRemote,
-  gitBranches,
-  gitCheckout,
-  gitCommit,
-  gitCreateBranch,
-  gitDiff,
-  gitDiscard,
-  gitFetch,
-  gitInit,
-  gitLog,
-  gitPull,
-  gitPush,
-  gitStage,
-  gitStatus,
-  gitUnstage,
-} from "./git";
-import { addPackage, listPackages, removePackage } from "./packages";
-import {
-  applyUpdate,
-  checkForUpdate,
-  downloadUpdate,
-  getLocalInfo,
-  getStatus,
-  setNotifyWebview,
-  startBackgroundChecks,
-} from "./updater";
-import { init as initUtils, openFileDialog } from "./utils";
-import { handleAiRoute } from "./ai";
-import {
-  createSession,
-  deleteSession,
-  getAuthStatus,
-  sendMessage,
-  stopSession,
-} from "@jxsuite/server/claude-session";
+  broadcastUpdateReady,
+  openProjectWindow,
+  parseProjectDirFromUrl,
+  setAiServerUrl,
+  setImportServiceUrl,
+} from "./window-manager";
 
-// ─── Determine project root ───────────────────────────────────────────────────
+// ─── App-level services (shared across all windows) ──────────────────────────
+// The boot sequence lives in an async function rather than top-level `await`: as an entry module
+// Nothing imports its completion, and a top-level await is dropped by Bun's test runtime when the
+// Module is pulled in via dynamic `import()` (the continuation after the await never resumes on
+// Windows), which makes the boot effects untestable. `ready` lets tests await the same sequence.
 
-const projectRoot = process.argv[2] || process.env.JSONSX_PROJECT_ROOT || process.cwd();
+async function main() {
+  await initUtils();
+  setFileDialog(openFileDialog);
+  setDirectoryDialog(openDirectoryDialog);
 
-setProjectRoot(projectRoot);
-await initUtils();
-setFileDialog(openFileDialog);
-
-// ─── Window maximize state (workaround for frameless window fullscreen bug) ──
-
-let _maximized = false;
-let _restoreFrame = { height: 900, width: 1400, x: 0, y: 0 };
-
-// ─── Register RPC handlers ────────────────────────────────────────────────────
-
-const rpc = BrowserView.defineRPC<StudioRPC>({
-  handlers: {
-    messages: {},
-    requests: {
-      addPackage: (params) => addPackage(params),
-      aiAuthStatus: () => getAuthStatus(),
-      aiCreateSession: (params) =>
-        createSession(projectRoot, params.message, {
-          ...(params.systemPrompt != null && {
-            systemPrompt: params.systemPrompt,
-          }),
-        }),
-      aiDeleteSession: (params) => {
-        deleteSession(params.id);
-      },
-      aiSendMessage: (params) => {
-        sendMessage(params.id, params.message);
-      },
-      aiStopSession: (params) => {
-        stopSession(params.id);
-      },
-      aiStreamUrl: (params) => `${aiServerUrl}/studio/ai/session/${params.id}/stream`,
-      codeService: (params) => codeService(params),
-      createDirectory: (params) => handleCreateDirectory(params),
-      deleteFile: (params) => handleDeleteFile(params),
-      discoverComponents: (params) => discoverComponents(params),
-      fetchPluginSchema: (params) => fetchPluginSchema(params),
-      formatAction: (params) => formatAction(params),
-      gitAddRemote: (params) => gitAddRemote(params),
-      gitBranches: () => gitBranches(),
-      gitCheckout: (params) => gitCheckout(params),
-      gitCommit: (params) => gitCommit(params),
-      gitCreateBranch: (params) => gitCreateBranch(params),
-      gitDiff: (params) => gitDiff(params),
-      gitDiscard: (params) => gitDiscard(params),
-      gitFetch: () => gitFetch(),
-      gitInit: () => gitInit(),
-      gitLog: (params) => gitLog(params),
-      gitPull: () => gitPull(),
-      gitPush: (params) => gitPush(params),
-      gitStage: (params) => gitStage(params),
-      gitStatus: () => gitStatus(),
-      gitUnstage: (params) => gitUnstage(params),
-      jxResolve: (params) => jxResolve(params),
-      jxServerFunction: (params) => jxServerFunction(params),
-      listDirectory: (params) => listDirectory(params),
-      listFormats: () => listFormats(),
-      listPackages: () => listPackages(),
-      locateFile: (params) => locateFile(params),
-      openProject: () => openProject(),
-      readFile: (params) => handleReadFile(params),
-      readFileAsDataUrl: (params) => handleReadFileAsDataUrl(params),
-      removePackage: (params) => removePackage(params),
-      renameFile: (params) => handleRenameFile(params),
-      resolveSiteContext: (params) => handleResolveSiteContext(params),
-      updaterApplyUpdate: () => applyUpdate(),
-      updaterCheckForUpdate: () => checkForUpdate(),
-      updaterDownloadUpdate: () => downloadUpdate(),
-      updaterGetLocalInfo: () => getLocalInfo(),
-      updaterGetStatus: () => getStatus(),
-      uploadFile: (params) => handleUploadFile(params),
-      windowClose: () => {
-        win.close();
-      },
-      windowGetFrame: (): {
-        x: number;
-        y: number;
-        width: number;
-        height: number;
-      } => win.getFrame(),
-      windowMaximize: () => {
-        if (_maximized) {
-          win.setFrame(_restoreFrame.x, _restoreFrame.y, _restoreFrame.width, _restoreFrame.height);
-          _maximized = false;
-        } else {
-          _restoreFrame = win.getFrame();
-          const display = Screen.getPrimaryDisplay();
-          const { x, y, width, height } = display.workArea;
-          win.setFrame(x, y, width, height);
-          _maximized = true;
+  // Shared services HTTP server (SSE/NDJSON streaming requires HTTP), loopback-bound. AI sessions
+  // Are id-keyed and process-global, so the server resolves requests by id and needs no fixed
+  // Project root (session creation flows through per-window RPC, which supplies the window's own
+  // Root). The import route writes to the filesystem, so it is additionally gated by a per-process
+  // Random token handed to webviews over RPC.
+  const importToken = crypto.randomUUID();
+  const aiServer = Bun.serve({
+    hostname: "127.0.0.1",
+    // Imports stream for minutes with heartbeats every 15s; match the dev server's generous timeout.
+    idleTimeout: 120,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const aiResponse = await handleAiApi(req, url);
+      if (aiResponse) {
+        return aiResponse;
+      }
+      if (url.pathname === "/__studio/import-site") {
+        if (url.searchParams.get("token") !== importToken) {
+          return new Response("Forbidden", { status: 403 });
         }
-      },
-      windowMinimize: () => {
-        win.minimize();
-      },
-      windowSetFrame: (params) => {
-        win.setFrame(params.x, params.y, params.width, params.height);
-      },
-      writeFile: (params) => handleWriteFile(params),
+        const importResponse = await handleImportApi(req, url, {
+          resolveDest: (dir) => {
+            // The webview resolves the destination under a natively-picked parent before posting.
+            if (!isAbsolute(dir)) {
+              throw new Error("directory must be an absolute path");
+            }
+            return dir;
+          },
+        });
+        if (importResponse) {
+          return importResponse;
+        }
+      }
+      return new Response("Not Found", { status: 404 });
     },
-  },
-  maxRequestTime: 300_000,
-});
+    port: 0,
+  });
 
-// ─── AI HTTP server (SSE streaming requires HTTP) ────────────────────────────
+  setAiServerUrl(`http://localhost:${aiServer.port}`);
+  setImportServiceUrl(
+    `http://127.0.0.1:${aiServer.port}/__studio/import-site?token=${importToken}`,
+  );
 
-const aiServer = Bun.serve({
-  async fetch(req) {
-    const url = new URL(req.url);
-    const path = url.pathname.replace(/^\/{2,}/, "/");
-    const aiResponse = await handleAiRoute(req, path, projectRoot);
-    if (aiResponse) {
-      return aiResponse;
+  installApplicationMenu();
+
+  startBackgroundChecks();
+  setNotifyWebview((version) => broadcastUpdateReady(version));
+
+  // ─── Initial window ────────────────────────────────────────────────────────
+  // A project root from argv (CLI / file association) or JSONSX_PROJECT_ROOT opens that project; a
+  // Bare launch opens a welcome window (the frontend shows the welcome screen when no project loads).
+
+  const initialRoot = process.argv[2] || process.env.JSONSX_PROJECT_ROOT || null;
+  openProjectWindow(initialRoot);
+
+  // ─── File associations (open-url) ──────────────────────────────────────────
+  // Double-clicking a project.json opens it in a new window (dedupe-focus if already open).
+
+  Electrobun.events.on("open-url", (e: { data: { url: string } }) => {
+    const dir = parseProjectDirFromUrl(e.data.url);
+    if (dir) {
+      openProjectWindow(dir);
     }
-    return new Response("Not Found", { status: 404 });
-  },
-  port: 0,
-});
+  });
+}
 
-const aiServerUrl = `http://localhost:${aiServer.port}`;
-
-// ─── Open the main window ─────────────────────────────────────────────────────
-
-const win = new BrowserWindow({
-  frame: { height: 900, width: 1400, x: 0, y: 0 },
-  navigationRules: "views://*,^*",
-  rpc,
-  title: "Jx Studio",
-  titleBarStyle: "hidden",
-  url: "views://studio/index.html",
-});
-
-startBackgroundChecks();
-setNotifyWebview((version) => rpc.send.updateReady({ version }));
-
-// ─── Handle file associations (open-url) ─────────────────────────────────────
-
-Electrobun.events.on("open-url", (e: { data: { url: string } }) => {
-  const url = new URL(e.data.url);
-  if (url.protocol === "file:") {
-    const filePath = decodeURIComponent(url.pathname).replace(/^\/([A-Za-z]:)/, "$1");
-    if (filePath.endsWith("project.json")) {
-      const dir = filePath.slice(0, filePath.lastIndexOf("/"));
-      setProjectRoot(dir);
-    }
-  }
-});
+// Intentional non-top-level-await: a top-level await here is dropped by Bun's test runtime when this
+// Module is pulled in via dynamic import (the continuation after the await never resumes), which is
+// Why the boot lives in main(). `ready` lets callers (tests) await the same sequence.
+// oxlint-disable-next-line unicorn/prefer-top-level-await
+export const ready = main();

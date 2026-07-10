@@ -53,7 +53,7 @@ export function renderCssVarsEditor(container: HTMLElement) {
   const mediaNames = media ? Object.keys(media).filter((m) => m !== "--") : [];
 
   const save = () => {
-    updateSiteConfig({ style: { ...rootStyle } });
+    void updateSiteConfig({ style: { ...rootStyle } });
   };
 
   const updateVar = (name: string, val: string) => {
@@ -114,7 +114,7 @@ function renderColorSection(
             <div class="css-var-swatch" style="background:${val}">
               <input
                 type="color"
-                .value=${val && String(val).startsWith("#") ? val : "#007acc"}
+                .value=${val && String(val).startsWith("#") ? val : "#3b82f6"}
                 @input=${(e: Event) => updateVar(name, (e.target as HTMLInputElement).value)}
               />
             </div>
@@ -131,7 +131,7 @@ function renderColorSection(
           </div>
         `,
       )}
-      ${renderAddRow("--color-", "Primary Blue", "#007acc", addVar)}
+      ${renderAddRow("--color-", "Primary Blue", "#3b82f6", addVar)}
     </div>
   `;
 }
@@ -297,7 +297,7 @@ function renderMediaOverrides(varName: string, rootStyle: JxStyle, mediaNames: s
                 (rootStyle[`@${o.mediaName}`] as Record<string, unknown>)[varName] = (
                   e.target as HTMLInputElement
                 ).value;
-                updateSiteConfig({ style: { ...rootStyle } });
+                void updateSiteConfig({ style: { ...rootStyle } });
               }}
               style="max-width:120px"
             ></sp-textfield>

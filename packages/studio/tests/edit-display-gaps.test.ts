@@ -65,6 +65,18 @@ describe("computeEmptyPlaceholderClass", () => {
     expect(computeEmptyPlaceholderClass({ tagName: "img" } as JxMutableNode)).toBeNull();
   });
 
+  test("layout-originated empty text tag returns null", () => {
+    expect(
+      computeEmptyPlaceholderClass({ $__layout: true, tagName: "span" } as JxMutableNode),
+    ).toBeNull();
+  });
+
+  test("layout-originated empty container tag returns null", () => {
+    expect(
+      computeEmptyPlaceholderClass({ $__layout: true, tagName: "div" } as JxMutableNode),
+    ).toBeNull();
+  });
+
   test("exported placeholder class list matches the two classes", () => {
     expect([...EMPTY_PLACEHOLDER_CLASSES]).toEqual([
       "empty-text-placeholder",
@@ -121,7 +133,7 @@ describe("prepareForEditMode basics", () => {
       { tagName: "p", textContent: "${x}" },
     ] as unknown as JxMutableNode) as unknown as Record<string, any>[];
     expect(Array.isArray(out)).toBe(true);
-    expect(out[0].textContent).toBe("❪ x ❫");
+    expect(out[0]!.textContent).toBe("❪ x ❫");
   });
 
   test("preserves state, $media and $elements untouched", () => {
@@ -161,19 +173,49 @@ describe("prepareForEditMode $props", () => {
   test("processes template strings, url props, refs and passthrough values", () => {
     const out = prep({
       $props: {
+        href: "${s}",
         label: "${t}",
         link: { $ref: "#/state/url" },
         other: { $ref: "raw.path" },
         plain: 5,
-        src: "${s}",
       },
       tagName: "x-card",
     });
     expect(out.$props.label).toBe("❪ t ❫");
-    expect(out.$props.src).toBe("");
+    // A url-target prop (href/action) blanks to "". Image-like keys (e.g. `src`) instead become the
+    // Placeholder image — covered separately below.
+    expect(out.$props.href).toBe("");
     expect(out.$props.link).toBe("{url}");
     expect(out.$props.other).toBe("{raw.path}");
     expect(out.$props.plain).toBe(5);
+  });
+
+  test("image-like template props become the neutral gray placeholder image", () => {
+    const out = prep({
+      $props: {
+        featuredImage: "${x}",
+        heroBg: "${y}",
+        href: "${item.h}",
+        image: "${item.data.featuredImage}",
+        title: "${item.t}",
+      },
+      tagName: "eer-category",
+    });
+    // Image-like keys (exact or camelCase suffix) → a data:image/svg+xml gray box, not a ❪ ❫ glyph.
+    expect(out.$props.image.startsWith("data:image/svg+xml")).toBe(true);
+    expect(out.$props.featuredImage.startsWith("data:image/svg+xml")).toBe(true);
+    expect(out.$props.heroBg.startsWith("data:image/svg+xml")).toBe(true);
+    // Non-image text prop → the readable ❪ expr ❫ binding glyph.
+    expect(out.$props.title).toBe("❪ item.t ❫");
+    expect(out.$props.title).toContain("❪");
+    expect(out.$props.title).toContain("❫");
+    // Link target prop → inert empty string.
+    expect(out.$props.href).toBe("");
+  });
+
+  test("a static (non-template) image prop is left untouched", () => {
+    const out = prep({ $props: { image: "/photo.png" }, tagName: "eer-category" });
+    expect(out.$props.image).toBe("/photo.png");
   });
 });
 
@@ -200,12 +242,31 @@ describe("prepareForEditMode children", () => {
     expect(out.children[0].children[0].textContent).toBe("❪ item ❫");
   });
 
-  test("mapped-array children without a template become empty", () => {
+  test("mapped-array children without a template still emit one (empty) perimeter", () => {
+    // One DOM node per array keeps the 1:1 sibling-index correspondence the patcher relies on.
     const out = prep({
       children: { $prototype: "Array" },
       tagName: "ul",
     });
-    expect(out.children).toEqual([]);
+    expect(out.children).toHaveLength(1);
+    expect(out.children[0].className).toBe("repeater-perimeter");
+    expect(out.children[0].children).toEqual([]);
+  });
+
+  test("array pseudo-element among siblings becomes one perimeter in place", () => {
+    const out = prep({
+      children: [
+        { tagName: "li", textContent: "header" },
+        { $prototype: "Array", map: { tagName: "li", textContent: "${item}" } },
+        { tagName: "li", textContent: "footer" },
+      ],
+      tagName: "ul",
+    });
+    expect(out.children).toHaveLength(3);
+    expect(out.children[0].textContent).toBe("header");
+    expect(out.children[1].className).toBe("repeater-perimeter");
+    expect(out.children[1].children[0].textContent).toBe("❪ item ❫");
+    expect(out.children[2].textContent).toBe("footer");
   });
 
   test("single object children recurse", () => {
@@ -343,5 +404,28 @@ describe("prepareForEditMode empty placeholders", () => {
   test("empty container without className gets bare placeholder class", () => {
     const out = prep({ tagName: "section" });
     expect(out.className).toBe("empty-container-placeholder");
+  });
+
+  test("layout-marked empty elements get no placeholder class", () => {
+    // Regression: decorative hamburger-bar spans in a page's layout shell rendered
+    // Overlapping "Click here to add text..." placeholders.
+    const out = prep({
+      $__layout: true,
+      children: [
+        { $__layout: true, style: { height: "3px" }, tagName: "span" },
+        { $__layout: true, style: { height: "3px" }, tagName: "span" },
+        { $__layout: true, style: { height: "3px" }, tagName: "span" },
+      ],
+      tagName: "button",
+    });
+    for (const bar of out.children) {
+      expect(bar.className).toBeUndefined();
+      expect(bar.$__layout).toBe(true);
+    }
+  });
+
+  test("identical non-layout empty span still gets text placeholder", () => {
+    const out = prep({ style: { height: "3px" }, tagName: "span" });
+    expect(out.className).toBe("empty-text-placeholder");
   });
 });

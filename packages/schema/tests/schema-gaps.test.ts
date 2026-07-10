@@ -39,8 +39,8 @@ class FakeAjv {
 
 const addFormatsCalls: unknown[] = [];
 
-mock.module("ajv", () => ({ default: FakeAjv }));
-mock.module("ajv-formats", () => ({
+void mock.module("ajv/dist/2020", () => ({ default: FakeAjv }));
+void mock.module("ajv-formats", () => ({
   default: (ajv: unknown) => {
     addFormatsCalls.push(ajv);
   },
@@ -57,7 +57,10 @@ console.error = (...args: unknown[]) => {
 
 process.argv = [process.argv[0] ?? "bun", join(TMP, "src", "schema.ts")];
 
-const { generateSchemaString, validateDocument } = await import("../src/schema");
+const { generateSchemaString, validateDocument, ready } = await import("../src/schema");
+// The CLI build runs in the exported `ready` promise (not a top-level await), so await it: Bun's
+// Test runtime drops a dynamically-imported module's top-level-await continuation on Windows.
+await ready;
 
 // Snapshot the CLI's output files before cleaning up the temp directory.
 const wroteComponent = existsSync(join(TMP, "schema.json"));

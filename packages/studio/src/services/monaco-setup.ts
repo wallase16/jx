@@ -18,11 +18,24 @@ const WORKER_PATHS: Record<string, string> = {
 
 self.MonacoEnvironment = {
   getWorker(_, label: string) {
-    const path = WORKER_PATHS[label] || WORKER_PATHS.editorWorkerService;
+    const path = WORKER_PATHS[label] || WORKER_PATHS.editorWorkerService!;
     return new Worker(path, { type: "module" });
   },
 };
 
+/* Monaco caches glyph widths when an editor is created. JetBrains Mono is a
+   vendored webfont (index.html @font-face) and may finish loading after the
+   first editor mounts, so remeasure once all document fonts are ready to keep
+   cursor and selection alignment correct. */
+if (typeof document !== "undefined" && document.fonts?.ready) {
+  // oxlint-disable-next-line unicorn/prefer-top-level-await -- fire-and-forget: awaiting fonts.ready at top level would block module evaluation (and studio startup) until webfonts load
+  void document.fonts.ready.then(async () => {
+    const monaco = await import("monaco-editor/esm/vs/editor/editor.api.js");
+    monaco.editor.remeasureFonts();
+  });
+}
+
+// oxlint-disable-next-line typescript/no-unsafe-call, typescript/no-unsafe-member-access -- jsonDefaults is imported from Monaco's untyped ESM contribution (see @ts-expect-error above); no type declarations exist for this named export
 jsonDefaults.setDiagnosticsOptions({
   allowComments: false,
   schemas: [

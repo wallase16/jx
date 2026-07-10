@@ -284,9 +284,15 @@ describe("compile — static nodes", () => {
     expect(html).toContain("<li>second</li>");
   });
 
-  test("node with no textContent, innerHTML, or children → empty inner", async () => {
+  test("void elements", async () => {
     const { html } = await compile({ tagName: "br" });
-    expect(html).toContain("<br></br>");
+    expect(html).toContain("<br>");
+    expect(html).not.toContain("<br></br>");
+  });
+
+  test("node with no textContent, innerHTML, or children → empty inner", async () => {
+    const { html } = await compile({ tagName: "div" });
+    expect(html).toContain("<div></div>");
   });
 
   test("no dynamic content → no module script", async () => {
@@ -317,11 +323,11 @@ describe("compile — dynamic documents (standard tagName → client target)", (
     expect(html).toContain("importmap");
     expect(html).toContain("@vue/reactivity");
     expect(files.length).toBe(1);
-    expect(files[0].path).toBe("app.js");
+    expect(files[0]!.path).toBe("app.js");
     // Client target: pre-rendered HTML, no custom element tag
     expect(html).not.toContain("<my-counter>");
     // Should have reactive state in JS
-    expect(files[0].content).toContain("const state = reactive({");
+    expect(files[0]!.content).toContain("const state = reactive({");
   });
 
   test("dynamic root with expanded signal uses client target", async () => {
@@ -330,10 +336,10 @@ describe("compile — dynamic documents (standard tagName → client target)", (
       { title: "My Widget" },
     );
     expect(files.length).toBe(1);
-    expect(files[0].path).toBe("app.js");
+    expect(files[0]!.path).toBe("app.js");
     expect(html).not.toContain("<my-widget>");
     // JS should extract default value correctly
-    expect(files[0].content).toContain("$x: 1,");
+    expect(files[0]!.content).toContain("$x: 1,");
   });
 
   test("fully static doc has no module files and no importmap", async () => {
@@ -405,8 +411,8 @@ describe("compile — dynamic documents (custom element tagName → element targ
       tagName: "my-widget",
     });
     expect(files.length).toBe(1);
-    expect(files[0].content).toContain("class MyWidget extends HTMLElement");
-    expect(files[0].content).toContain("customElements.define('my-widget'");
+    expect(files[0]!.content).toContain("class MyWidget extends HTMLElement");
+    expect(files[0]!.content).toContain("customElements.define('my-widget'");
   });
 });
 
@@ -524,9 +530,9 @@ describe("compile — Class route ($prototype: 'Class')", () => {
     const { html, files } = await compile(classDef);
     expect(html).toBe("");
     expect(files.length).toBe(1);
-    expect(files[0].path).toContain("Counter.js");
-    expect(files[0].content).toContain("class Counter");
-    expect(files[0].content).toContain("increment");
+    expect(files[0]!.path).toContain("Counter.js");
+    expect(files[0]!.content).toContain("class Counter");
+    expect(files[0]!.content).toContain("increment");
   });
 
   test("Class route uses source path for output when given string path", async () => {
@@ -556,8 +562,8 @@ describe("compile — Class route ($prototype: 'Class')", () => {
     try {
       const { html, files } = await compile(classPath);
       expect(html).toBe("");
-      expect(files[0].path).toContain("Widget.js");
-      expect(files[0].content).toContain("class Widget");
+      expect(files[0]!.path).toContain("Widget.js");
+      expect(files[0]!.content).toContain("class Widget");
     } finally {
       rmSync(fixDir, { force: true, recursive: true });
     }
@@ -715,6 +721,7 @@ describe("runCli", () => {
     const srcPath = join(fixDir, "bad.json");
     writeFileSync(srcPath, "not valid json {{{");
     try {
+      // oxlint-disable-next-line typescript/await-thenable -- bun:test async matcher returns a Promise; type-aware engine misresolves its return type
       await expect(runCli(srcPath)).rejects.toThrow();
     } finally {
       rmSync(fixDir, { force: true, recursive: true });

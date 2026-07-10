@@ -16,6 +16,14 @@
   "ignorePatterns": ["dist", "**/*.map"],
   "overrides": [
     {
+      // Claude hooks should be allowed to exit the process
+      "files": [".claude/**/*.*"],
+      "rules": {
+        "eslint/capitalized-comments": "off",
+        "unicorn/no-process-exit": "off"
+      }
+    },
+    {
       // Tool contracts (commitlint, electrobun, etc.) require default exports.
       "files": ["**/*.config.*", "**/commitlint.config.js"],
       "rules": {

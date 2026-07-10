@@ -1,5 +1,6 @@
+// oxlint-disable typescript/await-thenable -- bun test .resolves/.rejects matchers are typed `void` but return real Promises at runtime; the await is required.
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // In-process import of src/chromium/index.ts, a launcher with import-time side effects.
@@ -11,11 +12,42 @@ import { join } from "node:path";
 const FIXTURES = join(import.meta.dir, "_fixtures_chromium_index");
 const STUDIO_ASSETS = join(FIXTURES, "_studio_assets");
 
+// Convert an absolute filesystem path to the URL pathname a browser would request for it. A bare
+// POSIX path is already a valid URL path; a Windows path (C:\Users\x) becomes /C:/Users/x.
+function toUrlPath(absPath: string): string {
+  const forward = absPath.replaceAll("\\", "/");
+  return forward.startsWith("/") ? forward : `/${forward}`;
+}
+
 mkdirSync(join(FIXTURES, "public"), { recursive: true });
 mkdirSync(STUDIO_ASSETS, { recursive: true });
 writeFileSync(join(FIXTURES, "hello.txt"), "Hello Index");
 writeFileSync(join(FIXTURES, "public", "pub.css"), "body { margin: 0 }");
 writeFileSync(join(STUDIO_ASSETS, "index.html"), "<html>studio-shell</html>");
+// The iframe canvas assets the launcher must serve (staged by scripts/stage-studio-assets.ts).
+mkdirSync(join(STUDIO_ASSETS, "dist"), { recursive: true });
+writeFileSync(join(STUDIO_ASSETS, "canvas.html"), '<html><div id="jx-canvas-root"></div></html>');
+writeFileSync(join(STUDIO_ASSETS, "dist", "iframe-entry.js"), "// canvas entry stub");
+
+// A self-contained .class.json so the /__jx_resolve__ HTTP route returns a known value.
+writeFileSync(
+  join(FIXTURES, "Sum.class.json"),
+  JSON.stringify({
+    $defs: {
+      constructor: { $prototype: "Function", role: "constructor" },
+      fields: {
+        a: { access: "public", default: 0, identifier: "a", role: "field", scope: "instance" },
+        b: { access: "public", default: 0, identifier: "b", role: "field", scope: "instance" },
+      },
+      methods: {
+        resolve: { body: "return this.a + this.b;", identifier: "resolve", role: "method" },
+      },
+    },
+    $prototype: "Class",
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    title: "Sum",
+  }),
+);
 
 // ─── Mocked collaborator modules ────────────────────────────────────────────
 
@@ -34,10 +66,18 @@ const handlerMocks = {
   handleResolveSiteContext: mock(() => Promise.resolve({ sitePath: "." })),
   handleUploadFile: mock(() => Promise.resolve()),
   handleWriteFile: mock(() => Promise.resolve()),
+  jxResolve: mock((p: { body: string }) =>
+    Promise.resolve({ body: JSON.stringify({ resolved: p.body }), status: 200 }),
+  ),
+  jxServerFunction: mock((p: { body: string }) =>
+    Promise.resolve({ body: JSON.stringify({ server: p.body }), status: 200 }),
+  ),
   listDirectory: mock(() => Promise.resolve([{ name: "hello.txt", type: "file" }])),
   listFormats: mock(() => Promise.resolve([{ format: "markdown" }])),
   locateFile: mock(() => Promise.resolve("located/file.json")),
   openProject: mock(() => Promise.resolve({ config: { name: "P" }, handle: { root: "." } })),
+  createProject: mock(() => Promise.resolve({ config: { name: "New" }, root: "/new" })),
+  setDirectoryDialog: mock(() => {}),
   setFileDialog: mock(() => {}),
   setProjectRoot: mock(() => {}),
 };
@@ -65,21 +105,49 @@ const gitMocks = {
 
 const packageMocks = {
   addPackage: mock(() => Promise.resolve({ added: true })),
+  dependenciesNeedInstall: mock(() => Promise.resolve(true)),
+  installDependencies: mock(() => Promise.resolve({ ok: true })),
   listPackages: mock(() => Promise.resolve([{ name: "left-pad" }])),
+  outdatedPackages: mock(() => Promise.resolve([])),
   removePackage: mock(() => Promise.resolve({ removed: true })),
+  setPackageVersions: mock(() => Promise.resolve({ ok: true })),
 };
 
 const openFileDialogMock = mock(() => Promise.resolve("/picked/project.json"));
 
-const handleAiRouteMock = mock((_req: Request, path: string, _root: string) =>
-  Promise.resolve(path === "/studio/ai/auth-status" ? Response.json({ ok: true }) : null),
+const readRecentsMock = mock(() =>
+  Promise.resolve([{ name: "Recent", root: "/abs/recent", timestamp: 1 }]),
 );
+const writeRecentsMock = mock(() => Promise.resolve());
 
-mock.module("../src/handlers", () => handlerMocks);
-mock.module("../src/git", () => gitMocks);
-mock.module("../src/packages", () => packageMocks);
-mock.module("../src/chromium/utils", () => ({ openFileDialog: openFileDialogMock }));
-mock.module("../src/ai", () => ({ handleAiRoute: handleAiRouteMock }));
+void mock.module("../src/handlers", () => handlerMocks);
+void mock.module("../src/git", () => gitMocks);
+void mock.module("../src/packages", () => packageMocks);
+const openDirectoryDialogMock = mock(async () => null);
+void mock.module("../src/chromium/utils", () => ({
+  openDirectoryDialog: openDirectoryDialogMock,
+  openFileDialog: openFileDialogMock,
+}));
+void mock.module("../src/recent-store", () => ({
+  readRecents: readRecentsMock,
+  writeRecents: writeRecentsMock,
+}));
+
+const readSettingsMock = mock(() => Promise.resolve({ aiApiKey: "sk-abc" }));
+const writeSettingsMock = mock(() => Promise.resolve());
+void mock.module("../src/settings-store", () => ({
+  readSettings: readSettingsMock,
+  writeSettings: writeSettingsMock,
+}));
+
+// The import pipeline itself is exercised in @jxsuite/import; here only the route wiring matters.
+const importSiteMock = mock((options: Record<string, unknown>) => {
+  const outDir = options.outDir as string;
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, "project.json"), JSON.stringify({ name: "Imported" }));
+  return Promise.resolve({ outDir, pages: [], fileCount: 1, verify: null, warnings: [] });
+});
+void mock.module("@jxsuite/import/run", () => ({ importSite: importSiteMock }));
 
 // ─── Fake chromium child process ────────────────────────────────────────────
 
@@ -106,13 +174,13 @@ const spawnMock = mock((bin: string, args: string[], _opts: unknown) => {
   spawnCalls.push({ args, bin });
   return fakeChrome;
 });
-mock.module("node:child_process", () => ({ spawn: spawnMock }));
+void mock.module("node:child_process", () => ({ spawn: spawnMock }));
 
 // ─── Environment + globals for the import-time side effects ────────────────
 
 process.argv[2] = FIXTURES;
 process.env.JX_STUDIO_ASSETS = STUDIO_ASSETS;
-process.env.CHROMIUM_BIN = "sh"; // Resolvable via `which` everywhere
+process.env.CHROMIUM_BIN = "sh";
 process.env.WAYLAND_DISPLAY ||= "wayland-test";
 
 const exitCalls: number[] = [];
@@ -131,16 +199,23 @@ let server: ReturnType<typeof Bun.serve> | undefined;
   return server;
 };
 
+// Resolve CHROMIUM_BIN deterministically: the real Bun.which returns null in a stock Windows shell
+// (no `sh` on PATH), which would send the launcher down its "no chromium found" exit path instead.
+const realWhich = Bun.which.bind(Bun);
+(Bun as unknown as { which: (cmd: string) => string | null }).which = (cmd: string) =>
+  cmd === "sh" ? "/usr/bin/sh" : null;
+
 const logs: string[] = [];
 const realLog = console.log;
 console.log = (...args: unknown[]) => {
   logs.push(args.map(String).join(" "));
 };
 
-await import("../src/chromium/index");
+const chromiumIndex = await import("../src/chromium/index");
 
 console.log = realLog;
 (Bun as unknown as { serve: typeof Bun.serve }).serve = realServe;
+(Bun as unknown as { which: typeof Bun.which }).which = realWhich;
 
 const sigintHandlers = process
   .listeners("SIGINT")
@@ -149,7 +224,13 @@ const sigtermHandlers = process
   .listeners("SIGTERM")
   .filter((listener) => !sigtermBefore.has(listener));
 
-const baseUrl = `http://localhost:${server!.port}`;
+// The factory binds 127.0.0.1; localhost is a loopback alias the test client can also use.
+const baseUrl = `http://127.0.0.1:${server!.port}`;
+
+// Extract the rpc token the launcher threaded into the --app URL (?token=…). The privileged routes
+// And the WS upgrade are gated on it.
+const appArg = spawnCalls[0]!.args[0]!;
+const rpcToken = new URL(appArg.replace(/^--app=/, "")).searchParams.get("token")!;
 
 afterAll(() => {
   process.exit = realExit;
@@ -159,7 +240,7 @@ afterAll(() => {
   for (const listener of sigtermHandlers) {
     process.removeListener("SIGTERM", listener);
   }
-  server?.stop(true);
+  void server?.stop(true);
   rmSync(FIXTURES, { force: true, recursive: true });
 });
 
@@ -189,7 +270,7 @@ function rpc(method: string, params?: Record<string, unknown>): Promise<unknown>
 
 beforeAll(async () => {
   ws = await new Promise<WebSocket>((resolve, reject) => {
-    const socket = new WebSocket(`ws://localhost:${server!.port}`);
+    const socket = new WebSocket(`ws://127.0.0.1:${server!.port}/?token=${rpcToken}`);
     socket.addEventListener("open", () => resolve(socket));
     socket.addEventListener("error", reject);
   });
@@ -207,24 +288,102 @@ describe("chromium launcher startup", () => {
     expect(handlerMocks.setFileDialog).toHaveBeenCalledWith(openFileDialogMock);
   });
 
-  test("logs the server URL and project root", () => {
+  test("logs the loopback server URL and project root", () => {
     expect(logs.some((line) => line.includes(`Studio server at ${baseUrl}`))).toBe(true);
+    expect(logs.some((line) => line.includes("Studio server at http://127.0.0.1:"))).toBe(true);
     expect(logs.some((line) => line.includes(`Project root: ${FIXTURES}`))).toBe(true);
   });
 
-  test("spawns the resolved chromium binary in app mode", () => {
+  test("spawns the resolved chromium binary in app mode under /__studio__/ with the token", () => {
     expect(spawnCalls).toHaveLength(1);
     const [{ args, bin }] = spawnCalls;
     expect(bin.endsWith("/sh")).toBe(true);
-    expect(args[0]).toBe(`--app=${baseUrl}/studio/index.html`);
+    expect(args[0]).toBe(`--app=${baseUrl}/__studio__/index.html?token=${rpcToken}`);
+    expect(args[0]).toContain("127.0.0.1");
     expect(args).toContain("--no-first-run");
-    expect(args.some((a) => a.includes(".jx/chromium-profile"))).toBe(true);
+    // The profile dir is built with path.resolve, so the separator is OS-native (\ on Windows).
+    expect(args.some((a) => a.includes(join(".jx", "chromium-profile")))).toBe(true);
   });
 
   test("adds wayland flags when WAYLAND_DISPLAY is set", () => {
     const [{ args }] = spawnCalls;
     expect(args).toContain("--ozone-platform=wayland");
     expect(args).toContain("--enable-features=UseOzonePlatform");
+  });
+
+  test("seeds the profile Preferences before spawn so Chromium never offers to save the API key", () => {
+    // The credentials form's API-key field is a password input; without these profile prefs
+    // Chromium offers to save it to the OS password manager on every save.
+    const prefsFile = join(FIXTURES, ".jx", "chromium-profile", "Default", "Preferences");
+    const prefs = JSON.parse(readFileSync(prefsFile, "utf8")) as {
+      credentials_enable_service: boolean;
+      profile: { password_manager_enabled: boolean; password_manager_leak_detection: boolean };
+    };
+    expect(prefs.credentials_enable_service).toBe(false);
+    expect(prefs.profile.password_manager_enabled).toBe(false);
+    expect(prefs.profile.password_manager_leak_detection).toBe(false);
+  });
+});
+
+// ─── Chromium profile Preferences seeding ───────────────────────────────────
+
+describe("seedChromiumPreferences", () => {
+  test("merges into an existing Preferences file without clobbering unrelated keys", () => {
+    const dir = join(FIXTURES, "_prefs_merge");
+    mkdirSync(join(dir, "Default"), { recursive: true });
+    writeFileSync(
+      join(dir, "Default", "Preferences"),
+      JSON.stringify({
+        browser: { theme: "dark" },
+        credentials_enable_service: true,
+        profile: { exit_type: "Normal", password_manager_enabled: true },
+      }),
+    );
+    chromiumIndex.seedChromiumPreferences(dir);
+    const prefs = JSON.parse(readFileSync(join(dir, "Default", "Preferences"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(prefs.credentials_enable_service).toBe(false);
+    expect(prefs.browser).toEqual({ theme: "dark" });
+    expect(prefs.profile).toEqual({
+      exit_type: "Normal",
+      password_manager_enabled: false,
+      password_manager_leak_detection: false,
+    });
+  });
+
+  test("recovers from a corrupt Preferences file with a fresh object", () => {
+    const dir = join(FIXTURES, "_prefs_corrupt");
+    mkdirSync(join(dir, "Default"), { recursive: true });
+    writeFileSync(join(dir, "Default", "Preferences"), "{not json");
+    chromiumIndex.seedChromiumPreferences(dir);
+    const prefs = JSON.parse(readFileSync(join(dir, "Default", "Preferences"), "utf8"));
+    expect(prefs).toEqual({
+      credentials_enable_service: false,
+      profile: { password_manager_enabled: false, password_manager_leak_detection: false },
+    });
+  });
+
+  test("replaces a non-object profile value and creates the Default dir when missing", () => {
+    const dir = join(FIXTURES, "_prefs_fresh");
+    mkdirSync(join(dir, "Default"), { recursive: true });
+    writeFileSync(join(dir, "Default", "Preferences"), JSON.stringify({ profile: "bogus" }));
+    chromiumIndex.seedChromiumPreferences(dir);
+    const prefs = JSON.parse(readFileSync(join(dir, "Default", "Preferences"), "utf8")) as {
+      profile: Record<string, unknown>;
+    };
+    expect(prefs.profile).toEqual({
+      password_manager_enabled: false,
+      password_manager_leak_detection: false,
+    });
+
+    const bare = join(FIXTURES, "_prefs_bare");
+    chromiumIndex.seedChromiumPreferences(bare);
+    const seeded = JSON.parse(readFileSync(join(bare, "Default", "Preferences"), "utf8")) as {
+      credentials_enable_service: boolean;
+    };
+    expect(seeded.credentials_enable_service).toBe(false);
   });
 });
 
@@ -269,6 +428,60 @@ describe("chromium launcher RPC dispatch", () => {
     });
   });
 
+  test("getProjectRoot wraps the handler value in { root }", async () => {
+    expect(await rpc("getProjectRoot")).toEqual({ root: projectRootValue });
+  });
+
+  test("createProject dispatches to the createProject handler", async () => {
+    const result = await rpc("createProject", { directory: "n", name: "New" });
+    expect(result).toEqual({ config: { name: "New" }, root: "/new" });
+    expect(handlerMocks.createProject).toHaveBeenCalledWith({ directory: "n", name: "New" });
+  });
+
+  test("listStarters dispatches to the real starter registry", async () => {
+    const result = (await rpc("listStarters")) as { id: string }[];
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.some((s) => s.id === "restaurant")).toBe(true);
+  });
+
+  test("jxResolve / jxServerFunction WS methods dispatch to the handlers", async () => {
+    expect(await rpc("jxResolve", { body: '{"a":1}' })).toEqual({
+      body: JSON.stringify({ resolved: '{"a":1}' }),
+      status: 200,
+    });
+    expect(handlerMocks.jxResolve).toHaveBeenCalledWith({ body: '{"a":1}' });
+    expect(await rpc("jxServerFunction", { body: '{"x":2}' })).toEqual({
+      body: JSON.stringify({ server: '{"x":2}' }),
+      status: 200,
+    });
+    expect(handlerMocks.jxServerFunction).toHaveBeenCalledWith({ body: '{"x":2}' });
+  });
+
+  test("setWindowProject rebinds the root in place and reports no dedup", async () => {
+    expect(await rpc("setWindowProject", { root: "/abs/switch" })).toEqual({
+      config: null,
+      deduped: false,
+    });
+    expect(handlerMocks.setProjectRoot).toHaveBeenCalledWith("/abs/switch");
+  });
+
+  test("recent-projects handlers read from and write to the store", async () => {
+    expect(await rpc("getRecentProjects")).toEqual([
+      { name: "Recent", root: "/abs/recent", timestamp: 1 },
+    ]);
+    const projects = [{ name: "Saved", root: "/abs/saved", timestamp: 2 }];
+    await rpc("saveRecentProjects", { projects });
+    expect(writeRecentsMock).toHaveBeenCalledWith(projects);
+  });
+
+  test("settings handlers read from and write to the store", async () => {
+    expect(await rpc("getSettings")).toEqual({ aiApiKey: "sk-abc" });
+    expect(readSettingsMock).toHaveBeenCalled();
+    const settings = { aiApiKey: "sk-new", theme: "dark" };
+    expect(await rpc("saveSettings", { settings })).toBeNull();
+    expect(writeSettingsMock).toHaveBeenCalledWith(settings);
+  });
+
   test("git query methods return results", async () => {
     expect(await rpc("gitStatus")).toEqual({ branch: "main", files: [] });
     expect(await rpc("gitBranches")).toEqual({ branches: ["main"], current: "main" });
@@ -297,6 +510,15 @@ describe("chromium launcher RPC dispatch", () => {
     expect(await rpc("removePackage", { name: "left-pad" })).toEqual({ removed: true });
     expect(await rpc("listPackages")).toEqual([{ name: "left-pad" }]);
     expect(packageMocks.addPackage).toHaveBeenCalledWith({ name: "left-pad" });
+  });
+
+  test("dependency-management methods dispatch to the packages module", async () => {
+    expect(await rpc("installDependencies")).toEqual({ ok: true });
+    expect(await rpc("dependenciesNeedInstall")).toBe(true);
+    expect(await rpc("outdatedPackages")).toEqual([]);
+    const updates = [{ name: "@jxsuite/runtime", version: "^0.30.1" }];
+    expect(await rpc("setPackageVersions", { updates })).toEqual({ ok: true });
+    expect(packageMocks.setPackageVersions).toHaveBeenCalledWith({ updates });
   });
 
   test("Error rejections are reported via error.message", async () => {
@@ -330,35 +552,103 @@ describe("chromium launcher RPC dispatch", () => {
   });
 });
 
+// ─── AI-guided site import route ─────────────────────────────────────────────
+
+describe("chromium launcher import route", () => {
+  test("pickDirectory RPC opens the native directory dialog", async () => {
+    const result = await rpc("pickDirectory");
+    expect(result).toEqual({ path: null });
+    expect(openDirectoryDialogMock).toHaveBeenCalled();
+  });
+
+  test("rejects a relative destination directory", async () => {
+    const res = await fetch(`${baseUrl}/__studio__/import-site?token=${rpcToken}`, {
+      body: JSON.stringify({ directory: "relative/dest", url: "https://clone.example/" }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("absolute");
+  });
+
+  test("imports into an absolute destination with the launcher's browser binary", async () => {
+    const dest = join(FIXTURES, "imported-site");
+    const res = await fetch(`${baseUrl}/__studio__/import-site?token=${rpcToken}`, {
+      body: JSON.stringify({ directory: dest, url: "https://clone.example/" }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines.at(-1)?.type).toBe("done");
+    expect(lines.at(-1)?.root).toBe(dest);
+    // The chromium binary the launcher discovered doubles as puppeteer's browser.
+    const opts = importSiteMock.mock.calls.at(-1)?.[0] as { chromePath?: string };
+    expect(opts.chromePath).toBe("/usr/bin/sh");
+  });
+});
+
 // ─── HTTP static serving ────────────────────────────────────────────────────
 
 describe("chromium launcher HTTP server", () => {
-  test("serves studio assets under /studio/", async () => {
-    const res = await fetch(`${baseUrl}/studio/index.html`);
+  test("serves studio assets under /__studio__/ with Referrer-Policy same-origin", async () => {
+    // Same-origin (not no-referrer): the studio shell's asset fetches must carry a referrer so the
+    // Server-side referrer checks pass — see @jxsuite/server commit bdbb33a6.
+    const res = await fetch(`${baseUrl}/__studio__/index.html`);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("studio-shell");
+    expect(res.headers.get("Referrer-Policy")).toBe("same-origin");
   });
 
-  test("delegates /studio/ai/ routes to handleAiRoute", async () => {
-    const res = await fetch(`${baseUrl}/studio/ai/auth-status`);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
-    expect(handleAiRouteMock).toHaveBeenCalled();
+  test("serves the iframe canvas doc + bundle under /__studio__/", async () => {
+    // The canvas iframe boots from /__studio__/canvas.html (see chromium/platform.ts canvasUrl);
+    // A missing file here is the packaged-app "Not found" iframe regression.
+    const doc = await fetch(`${baseUrl}/__studio__/canvas.html`);
+    expect(doc.status).toBe(200);
+    expect(await doc.text()).toContain("jx-canvas-root");
+    const entry = await fetch(`${baseUrl}/__studio__/dist/iframe-entry.js`);
+    expect(entry.status).toBe(200);
   });
 
-  test("falls through to 404 when handleAiRoute returns null", async () => {
-    const res = await fetch(`${baseUrl}/studio/ai/not-a-route`);
+  test("studio-asset over-encoded traversal out of studioDir is 404", async () => {
+    // A single fetch/URL parse collapses real "../"; an over-encoded %252e survives one decode as
+    // %2e and is rejected by the server's over-encoding guard.
+    const res = await fetch(`${baseUrl}/__studio__/%252e%252e/hello.txt`);
     expect(res.status).toBe(404);
   });
 
+  test("POST /__jx_resolve__ with the token dispatches to handleResolve", async () => {
+    const res = await fetch(`${baseUrl}/__jx_resolve__?token=${rpcToken}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ $prototype: "Sum", $src: "./Sum.class.json", a: 2, b: 3 }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toBe(5);
+  });
+
+  test("POST /__jx_resolve__ without the token is 403", async () => {
+    const res = await fetch(`${baseUrl}/__jx_resolve__`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ $src: "./Sum.class.json" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
   test("serves absolute paths under the project root", async () => {
-    const res = await fetch(`${baseUrl}${FIXTURES}/hello.txt`);
+    const res = await fetch(`${baseUrl}${toUrlPath(FIXTURES)}/hello.txt`);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("Hello Index");
   });
 
   test("falls through when an absolute path under the root does not exist", async () => {
-    const res = await fetch(`${baseUrl}${FIXTURES}/missing-abs.txt`);
+    const res = await fetch(`${baseUrl}${toUrlPath(FIXTURES)}/missing-abs.txt`);
     expect(res.status).toBe(404);
   });
 
@@ -368,16 +658,22 @@ describe("chromium launcher HTTP server", () => {
     expect(await res.text()).toBe("Hello Index");
   });
 
-  test("collapses leading double slashes", async () => {
-    const res = await fetch(`${baseUrl}//hello.txt`);
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("Hello Index");
-  });
-
   test("serves files from the public/ subdirectory", async () => {
     const res = await fetch(`${baseUrl}/pub.css`);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("margin: 0");
+  });
+
+  test("over-encoded ../ traversal of a project file is 404", async () => {
+    const res = await fetch(`${baseUrl}/%252e%252e/hello.txt`);
+    expect(res.status).toBe(404);
+  });
+
+  test("an absolute path outside the project root is 404", async () => {
+    // The tests directory sits outside FIXTURES (the project root). An absolute request for a file
+    // That really exists there must not be served — containment is by root, not by existence.
+    const res = await fetch(`${baseUrl}${toUrlPath(import.meta.dir)}/chromium-index.test.ts`);
+    expect(res.status).toBe(404);
   });
 
   test("returns 404 for missing files", async () => {

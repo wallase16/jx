@@ -15,6 +15,8 @@
 
 ---
 
+[![codecov](https://codecov.io/gh/jxsuite/jx/graph/badge.svg?token=4ZDC9K0CDD)](https://codecov.io/gh/jxsuite/jx)
+
 ## What is Jx?
 
 Jx is a schema and runtime for building reactive web applications using **plain JSON**. A Jx application is a tree of JSON objects whose structure mirrors the DOM API, whose reactivity is powered by [`@vue/reactivity`](https://github.com/vuejs/core/tree/main/packages/reactivity), and whose behavior is declared as inline functions or external module references.
@@ -114,17 +116,23 @@ Template strings work anywhere — element properties, styles, attributes:
 
 ### Dynamic lists
 
+A repeater is an array pseudo-element — a `$prototype: "Array"` object placed as a member of a
+`children` array (among siblings or alone). Its items render directly into the parent, with no
+wrapper element:
+
 ```json
 {
   "tagName": "ul",
-  "children": {
-    "$prototype": "Array",
-    "items": { "$ref": "#/state/todos" },
-    "map": {
-      "tagName": "li",
-      "textContent": "${$map.item.text}"
+  "children": [
+    {
+      "$prototype": "Array",
+      "items": { "$ref": "#/state/todos" },
+      "map": {
+        "tagName": "li",
+        "textContent": "${$map.item.text}"
+      }
     }
-  }
+  ]
 }
 ```
 
@@ -179,7 +187,7 @@ Mark a state entry with `timing: "server"` to run it server-side. The browser re
 Jx Studio is a visual builder for Jx documents, available as a browser-based dev tool and a standalone desktop app.
 
 <p align="center">
-  <img src="sites/jxsuite.com/public/studio.png" alt="Jx Studio" width="800">
+  <img src="sites/jxsuite.com/public/screenshots/hero.png" alt="Jx Studio editing the jxsuite.com homepage — layers panel, live canvas, and element inspector" width="800">
 </p>
 
 - Canvas with live preview and inline editing

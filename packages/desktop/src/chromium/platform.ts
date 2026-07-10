@@ -1,23 +1,47 @@
 /// <reference lib="dom" />
-import type { StudioPlatform } from "@jxsuite/studio/types";
+import { streamImport } from "@jxsuite/studio/import-client";
+import type {
+  ComponentMeta,
+  ImportProgressEvent,
+  ImportSiteOptions,
+  RecentProjectEntry,
+  RenameResult,
+  StarterInfo,
+  StudioPlatform,
+} from "@jxsuite/studio/types";
 import type { ProjectConfig } from "@jxsuite/schema/types";
 import type {
   CodeServiceResult,
-  ComponentMeta,
   DirEntry,
   GitBranchesResult,
   GitLogEntry,
   GitStatusResult,
+  OutdatedInfo,
   PackageInfo,
+  PackageOpResult,
 } from "../rpc-schema";
 
 export function createDesktopPlatform(): StudioPlatform {
-  const ws = new WebSocket(`ws://${location.host}`);
+  // The project server gates the WS upgrade on the token. The launcher passes it in the shell URL
+  // (?token=…); read it here before the shell strips it from the address bar after boot.
+  const token = new URLSearchParams(location.search).get("token") ?? "";
+  const ws = new WebSocket(`ws://${location.host}/?token=${encodeURIComponent(token)}`);
+  // The canvas iframe runs the in-iframe runtime, which authenticates its dev-proxy loopback
+  // Resolve/server fetches with this same per-process rpcToken (?rpcToken=…). Thread it onto the
+  // Canvas URL when present so createProjectServer does not 403 those fetches; keep the bare path
+  // Otherwise so a token-less/dev context stays byte-identical. Mirrors electrobun's getCanvasUrl.
+  const canvasUrl = token
+    ? `/__studio__/canvas.html?rpcToken=${encodeURIComponent(token)}`
+    : "/__studio__/canvas.html";
   let nextId = 1;
   const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
   ws.addEventListener("message", (event) => {
-    const msg = JSON.parse(event.data);
+    const msg = JSON.parse(event.data as string) as {
+      id: number;
+      error?: string;
+      result?: unknown;
+    };
     const p = pending.get(msg.id);
     if (!p) {
       return;
@@ -50,6 +74,12 @@ export function createDesktopPlatform(): StudioPlatform {
 
     projectRoot: "",
 
+    // The chromium project server serves the canvas iframe doc under /__studio__/. Only chromium
+    // Sets this; electrobun and the dev server leave it unset and keep their default canvas path.
+    // The ?rpcToken (computed above) authenticates the in-iframe runtime's loopback resolve/server
+    // Fetches, mirroring electrobun's getCanvasUrl RPC.
+    canvasUrl,
+
     async activate() {
       // No-op: the chromium platform needs no activation step
     },
@@ -65,24 +95,54 @@ export function createDesktopPlatform(): StudioPlatform {
       try {
         const content = await request("readFile", { path: "project.json" });
         const config = JSON.parse(content as string) as { name?: string };
+        // Resolve the absolute backend root so the recent-projects list gets a re-openable key.
+        const { root } = (await request("getProjectRoot")) as { root: string | null };
         return {
           info: {
             directories: [] as string[],
             isSiteProject: true as const,
             projectConfig: config as ProjectConfig,
           },
-          meta: { name: config.name || "project", root: "." },
+          meta: { name: config.name || "project", root: root || "." },
         };
       } catch {
-        return {
-          info: {
-            directories: [] as string[],
-            isSiteProject: false as const,
-            projectConfig: null,
-          },
-          meta: { name: "project", root: "." },
-        };
+        // The launcher's root defaults to the launch cwd, which usually holds no project.json.
+        // Report "no project" (null) so the studio shows the welcome screen — returning a phantom
+        // Non-site project instead sets projectState and suppresses the welcome screen for the
+        // Whole session (mirrors the electrobun platform's probeRootProject contract).
+        return null;
       }
+    },
+
+    async getProjectRoot() {
+      return request("getProjectRoot") as Promise<{ root: string | null }>;
+    },
+
+    async setWindowProject(root: string) {
+      return request("setWindowProject", { root }) as Promise<{
+        deduped: boolean;
+        config: ProjectConfig | null;
+      }>;
+    },
+
+    // ─── Recent projects (user-level store, shared across per-project profiles) ──
+
+    async getRecentProjects() {
+      return request("getRecentProjects") as Promise<RecentProjectEntry[]>;
+    },
+
+    async saveRecentProjects(projects: RecentProjectEntry[]) {
+      await request("saveRecentProjects", { projects });
+    },
+
+    // ─── User settings (user-level store, shared across per-project profiles) ──
+
+    async getSettings() {
+      return request("getSettings") as Promise<Record<string, string>>;
+    },
+
+    async saveSettings(settings: Record<string, string>) {
+      await request("saveSettings", { settings });
     },
 
     async resolveSiteContext(filePath: string) {
@@ -105,7 +165,7 @@ export function createDesktopPlatform(): StudioPlatform {
       return request("writeFile", { content, path }) as Promise<void>;
     },
 
-    async uploadFile(path: string, data: string) {
+    async uploadFile(path: string, data: string | File | Blob | ArrayBuffer) {
       return request("uploadFile", { data, path }) as Promise<unknown>;
     },
 
@@ -114,7 +174,7 @@ export function createDesktopPlatform(): StudioPlatform {
     },
 
     async renameFile(from: string, to: string) {
-      return request("renameFile", { from, to }) as Promise<void>;
+      return request("renameFile", { from, to }) as Promise<RenameResult>;
     },
 
     async createDirectory(path: string) {
@@ -216,6 +276,24 @@ export function createDesktopPlatform(): StudioPlatform {
       return request("listFormats", {}) as Promise<Record<string, unknown>[]>;
     },
 
+    /**
+     * Class resolution over HTTP: the project server gates `/__jx_resolve__` on the RPC token (a
+     * token-less fetch 403s), so pass the token captured from the shell URL.
+     *
+     * @param {Record<string, unknown>} body
+     */
+    async resolveClass(body: Record<string, unknown>) {
+      const res = await fetch(`/__jx_resolve__?token=${encodeURIComponent(token)}`, {
+        body: JSON.stringify(body),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      if (!res.ok) {
+        throw new Error(`Class resolution failed: ${res.status}`);
+      }
+      return (await res.json()) as unknown;
+    },
+
     /** @param {Record<string, unknown>} payload */
     async formatAction(payload: Record<string, unknown>) {
       return request("formatAction", payload);
@@ -233,12 +311,39 @@ export function createDesktopPlatform(): StudioPlatform {
       return request("listPackages") as Promise<PackageInfo[]>;
     },
 
+    async installDependencies() {
+      return request("installDependencies") as Promise<PackageOpResult>;
+    },
+
+    async dependenciesNeedInstall() {
+      return request("dependenciesNeedInstall") as Promise<boolean>;
+    },
+
+    async outdatedPackages() {
+      return request("outdatedPackages") as Promise<OutdatedInfo[]>;
+    },
+
+    async setPackageVersions(updates: { name: string; version: string; dev?: boolean }[]) {
+      return request("setPackageVersions", { updates }) as Promise<PackageOpResult>;
+    },
+
     async createProject(opts: {
       name: string;
       description?: string;
       url?: string;
       adapter?: string;
       directory: string;
+      starter?: string;
+      template?: string;
+      design?: {
+        accent?: string;
+        background?: string;
+        text?: string;
+        bodyFont?: string;
+        headingFont?: string;
+        media?: Record<string, string>;
+        logo?: { name: string; base64: string };
+      };
     }) {
       return request("createProject", opts) as Promise<{
         root: string;
@@ -246,34 +351,41 @@ export function createDesktopPlatform(): StudioPlatform {
       }>;
     },
 
-    // AI Assistant
-    async aiAuthStatus() {
-      const res = await fetch("/studio/ai/auth-status");
-      return res.json() as Promise<{ authenticated: boolean; error?: string }>;
+    async listStarters() {
+      return request("listStarters") as Promise<StarterInfo[]>;
     },
-    async aiCreateSession(opts: { message: string; systemPrompt?: string }) {
-      const res = await fetch("/studio/ai/session", {
-        body: JSON.stringify(opts),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      });
-      return res.json() as Promise<{ id: string }>;
+
+    async pickDirectory() {
+      const result = (await request("pickDirectory")) as { path: string | null };
+      return result.path;
     },
-    async aiSendMessage(id: string, message: string) {
-      await fetch(`/studio/ai/session/${id}/message`, {
-        body: JSON.stringify({ message }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      });
+
+    // AI-guided site import: streams NDJSON progress from the token-gated loopback endpoint. A
+    // Relative directory (the modal's slug) is resolved under a natively-picked parent folder.
+    async importSite(
+      opts: ImportSiteOptions,
+      onProgress: (evt: ImportProgressEvent) => void,
+      signal?: AbortSignal,
+    ) {
+      let { directory } = opts;
+      if (!/^(?:[a-zA-Z]:[\\/]|\/)/.test(directory)) {
+        const parentResult = (await request("pickDirectory")) as { path: string | null };
+        if (!parentResult.path) {
+          throw new Error("No destination folder was selected.");
+        }
+        directory = `${parentResult.path}/${directory}`;
+      }
+      return streamImport(
+        `/__studio__/import-site?token=${encodeURIComponent(token)}`,
+        { ...opts, directory },
+        onProgress,
+        signal,
+      );
     },
-    aiStreamUrl(id: string) {
-      return `/studio/ai/session/${id}/stream`;
-    },
-    async aiStopSession(id: string) {
-      await fetch(`/studio/ai/session/${id}/stop`, { method: "POST" });
-    },
-    async aiDeleteSession(id: string) {
-      await fetch(`/studio/ai/session/${id}`, { method: "DELETE" });
+
+    // AI Assistant (Stack B: OpenAI-compatible SSE proxy on the local chromium server)
+    aiChatUrl() {
+      return "/__studio__/ai/chat";
     },
   };
 }

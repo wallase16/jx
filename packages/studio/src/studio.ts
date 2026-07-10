@@ -19,6 +19,7 @@ import {
   requireProjectState,
   setProjectState,
   toolbarEl,
+  updateSession,
   updateUi,
 } from "./store";
 
@@ -28,20 +29,28 @@ import { effect } from "./reactivity";
 
 import { view } from "./view";
 
-import { isEditableBlock, isEditing } from "./editor/inline-edit";
-import { enterComponentInlineEdit, initComponentInlineEdit } from "./editor/component-inline-edit";
-import { enterInlineEdit } from "./editor/content-inline-edit";
+import { isEditing } from "./editor/inline-edit";
 import { applyTransform, initCanvasUtils, positionZoomIndicator } from "./canvas/canvas-utils";
-import { findCanvasElement, getActivePanel, initCanvasHelpers } from "./canvas/canvas-helpers";
 import {
-  applyCanvasMediaOverrides,
   initCanvasRender,
   renderCanvas,
   renderOverlays,
   scheduleCanvasRender,
 } from "./canvas/canvas-render";
 import { consumePatchedDocument, initCanvasPatcher } from "./canvas/canvas-patcher";
-import { registerSubtreeDnD } from "./panels/canvas-dnd";
+import {
+  commitActiveEditSession,
+  getEditSnapshot,
+  setCanvasContextMenuHandler,
+  setCanvasSlashHandler,
+  setIframePatchEscalation,
+  setInsertZoneClickHandler,
+  setStylebookHitHandler,
+  setToolbarRefresh,
+} from "./canvas/iframe-host";
+import { runInsertZoneAction } from "./editor/insert-zone-action";
+import { canvasSlashHandler } from "./editor/canvas-slash-bridge";
+import { makeCanvasContextMenuHandler } from "./editor/canvas-context-menu";
 import { initCanvasLiveRender } from "./canvas/canvas-live-render";
 import {
   mountStatusbar,
@@ -50,7 +59,12 @@ import {
   statusMessage,
 } from "./panels/statusbar";
 import { exportFile, parseSourceForPath, saveFile, serializeDocument } from "./files/file-ops";
-import { documentExtensions, formatForPath, loadFormats } from "./format/format-host";
+import {
+  documentExtensions,
+  formatForPath,
+  loadFormats,
+  refreshFormats,
+} from "./format/format-host";
 import {
   loadProject as _loadProject,
   openProject as _openProject,
@@ -59,11 +73,20 @@ import {
   openFileInTab,
   openHomePage,
   registerFileTreeDnD,
+  reloadCleanTab,
   setupTreeKeyboard,
 } from "./files/files";
+import { startFsSync } from "./files/fs-events";
+import {
+  configureCollabNotifier,
+  configureCollabParser,
+  configureCollabSerializer,
+} from "./collab/collab-session";
 import { renderImportsTemplate } from "./panels/imports-panel";
 import { renderHeadTemplate } from "./panels/head-panel";
 import { exportCemManifest as _exportCemManifest } from "./services/cem-export";
+import { installAutomationHook } from "./services/automation";
+import { openBrowseModal } from "./browse/browse-modal";
 
 import { getPlatform, hasPlatform, registerPlatform } from "./platform";
 import { parseMediaEntries } from "./utils/canvas-media";
@@ -72,6 +95,9 @@ import { mountResizeEdges } from "./resize-edges";
 import { codeService } from "./services/code-services";
 import { defBadgeLabel, defCategory, renderSignalsTemplate } from "./panels/signals-panel";
 import { loadComponentRegistry } from "./files/components";
+import { ensureDependenciesInstalled } from "./packages/ensure-deps";
+import { maybePromptJxsuiteUpdate } from "./packages/jxsuite-update";
+import { autoSyncProjectOnOpen } from "./packages/pull-package-sync";
 
 import { html, render as litRender } from "lit-html";
 
@@ -92,21 +118,27 @@ import * as overlaysPanel from "./panels/overlays";
 import * as rightPanelMod from "./panels/right-panel";
 import * as leftPanelMod from "./panels/left-panel";
 import * as tabStrip from "./panels/tab-strip";
-import { renderStylebookOverlays } from "./panels/stylebook-panel";
+import * as tabBar from "./panels/tab-bar";
+import { selectStylebookTag } from "./panels/stylebook-panel";
 import { registerLayersDnD, registerComponentsDnD, registerElementsDnD } from "./panels/dnd";
+import { registerCanvasDndBridge } from "./panels/canvas-dnd-bridge";
 import { defaultDef } from "./panels/shared";
 import { registerFunctionCompletions } from "./panels/editors";
-import { renderBlockActionBar, initBlockActionBar } from "./panels/block-action-bar";
+import {
+  initBlockActionBar,
+  isEditChromeTarget,
+  renderBlockActionBar,
+} from "./panels/block-action-bar";
 import { initCssData } from "./panels/style-utils";
-import { updateForcedPseudoPreview } from "./panels/pseudo-preview";
-import { initPanelEvents } from "./panels/panel-events";
 import { initQuickSearch } from "./panels/quick-search";
-import { addRecentProject } from "./recent-projects";
+import { hydrateProjectList } from "./project-list";
+import { addRecentProject, hydrateRecentProjects, removeRecentProject } from "./recent-projects";
+import { hydrateSettings } from "./services/settings-store";
 import { initWelcome } from "./panels/welcome-screen";
 import { openNewProjectModal } from "./new-project/new-project-modal";
 import type { DocumentStackEntry, GitDiffState } from "./types";
 import type { JxPath } from "./state";
-import type { JxMutableNode } from "@jxsuite/schema/types";
+import type { JxMutableNode, ProjectConfig } from "@jxsuite/schema/types";
 
 void _swc;
 
@@ -114,8 +146,14 @@ void _swc;
 // These mutable variables are local to studio.js for now. As sections are extracted
 // Into their own modules, they will migrate to ctx in store.js.
 
+// Effective canvas mode: the per-tab preview toggle composes with an edit/design base mode and
+// Presents as "preview" to every downstream gate (doc resolution, iframe flags, interaction
+// Surfaces). Consumers needing the base mode (toolbar switcher selection, canvas host layout)
+// Read tab.session.ui.canvasMode directly.
 function getCanvasMode() {
-  return activeTab.value?.session.ui.canvasMode ?? "design";
+  const ui = activeTab.value?.session.ui;
+  const base = ui?.canvasMode ?? "design";
+  return ui?.preview && (base === "edit" || base === "design") ? "preview" : base;
 }
 
 /** @param {string} mode */
@@ -141,7 +179,7 @@ async function navigateToComponent(componentPath: string) {
     if (!content) {
       return;
     }
-    const parsed = JSON.parse(content);
+    const parsed = JSON.parse(content) as JxMutableNode;
     const tab = activeTab.value;
     if (!tab) {
       return;
@@ -297,7 +335,7 @@ requestIdleCallback(() => {
   const frag = document.createDocumentFragment();
   for (const [name] of webdata.cssProps) {
     const opt = document.createElement("option");
-    opt.value = name;
+    opt.value = name!;
     frag.append(opt);
   }
   dl.append(frag);
@@ -314,6 +352,18 @@ if (!hasPlatform()) {
   registerPlatform(createDevServerPlatform());
 }
 
+// Screenshot/automation runners (scripts/screenshots/) await window.__jxAutomation right after
+// Navigation, so the gated hook must install before the async deep-link project load below.
+installAutomationHook({
+  getCanvasMode,
+  openBrowseModal,
+  openNewProjectModal,
+  render,
+  renderActivityBar,
+  setCanvasMode,
+  statusMessage,
+});
+
 mountResizeEdges();
 
 // ─── Render loop ──────────────────────────────────────────────────────────────
@@ -324,11 +374,8 @@ initShellRefs();
 toolbarPanel.mount(toolbarEl, {
   closeFunctionEditor: () => closeFunctionEditor(),
   getCanvasMode,
-  navigateBack: () => navigateBack(),
-  navigateToLevel: (i: number) => navigateToLevel(i),
   openProject: () => openProject(),
   openRecentProject: (root: string) => openRecentProject(root),
-  parseMediaEntries,
   renderCanvas: () => renderCanvas(),
   safeRenderRightPanel: () => safeRenderRightPanel(),
   saveFile: () => saveFile(),
@@ -336,9 +383,18 @@ toolbarPanel.mount(toolbarEl, {
 });
 
 initLayers();
-initQuickSearch();
+initQuickSearch({ openRecentProject: (root: string) => openRecentProject(root) });
 
 tabStrip.mount(document.querySelector("#tab-strip") as HTMLElement);
+
+tabBar.mount(document.querySelector("#tab-bar") as HTMLElement, {
+  closeFunctionEditor: () => closeFunctionEditor(),
+  exportFile,
+  getCanvasMode,
+  navigateBack: () => navigateBack(),
+  navigateToLevel: (i: number) => navigateToLevel(i),
+  parseMediaEntries,
+});
 
 overlaysPanel.mount({
   getCanvasMode,
@@ -350,42 +406,59 @@ initBlockActionBar({
   getCanvasMode,
   navigateToComponent,
 });
-
-initComponentInlineEdit({ findCanvasElement });
-initCanvasHelpers({
-  getCanvasMode,
-  getZoom: () => activeTab.value?.session.ui.zoom ?? 1,
+// The iframe's re-emitted selection snapshot drives the parent format toolbar refresh (4b-2).
+setToolbarRefresh(renderBlockActionBar);
+// The cross-origin insertion "+" click runs the parent-realm slash-menu → mutateInsertNode flow.
+setInsertZoneClickHandler(runInsertZoneAction);
+// The in-iframe "/" trigger drives the parent-realm Spectrum slash menu across the bridge.
+setCanvasSlashHandler(canvasSlashHandler);
+// Canvas right-clicks show the parent-realm Jx element context menu across the bridge.
+setCanvasContextMenuHandler(makeCanvasContextMenuHandler({ navigateToComponent }));
+// Stylebook hits decode to a TAG in the host and route here (null = clicked chrome/empty space).
+setStylebookHitHandler((tag, media) => {
+  if (tag) {
+    selectStylebookTag(tag, media);
+  } else {
+    updateSession({ ui: { activeSelector: null, stylebookSelection: null } });
+  }
 });
+// Commit-on-parent-click: a pointerdown in PARENT chrome outside the edit-session chrome (format
+// Toolbar / link popover / slash menu) ends the live inline-edit session — the iframe can't observe
+// Parent-realm pointer events (layers panel, tab strip, right panel…). Pointerdowns over the canvas
+// Land inside the cross-origin iframe and never reach this listener, so it can't double-fire with
+// The iframe's own click-away commit.
+document.addEventListener(
+  "pointerdown",
+  (e) => {
+    if (getEditSnapshot().editing && !isEditChromeTarget(e.target)) {
+      commitActiveEditSession();
+    }
+  },
+  true,
+);
+
 initCanvasUtils({
   getCanvasMode,
   getZoom: () => activeTab.value?.session.ui.zoom ?? 1,
-  renderStylebookOverlays,
   setZoomDirect: (zoom) => {
     if (activeTab.value) {
       activeTab.value.session.ui.zoom = zoom;
     }
   },
 });
-initPanelEvents({
-  enterInlineEdit,
-  getCanvasMode,
-  navigateToComponent,
-});
 initCanvasLiveRender({
   getCanvasMode,
 });
 initCanvasPatcher({
-  applyCanvasMediaOverrides,
-  enterComponentInlineEdit,
   getCanvasMode,
-  registerSubtreeDnD,
   renderOverlays,
   scheduleCanvasRender,
-  updateForcedPseudoPreview,
 });
+// When the iframe canvas can't apply a posted patch surgically, fall back to a full render.
+setIframePatchEscalation(scheduleCanvasRender);
+// One global coordinator monitor drives cross-frame palette→canvas drops (Phase 4c).
+registerCanvasDndBridge();
 initCanvasRender({
-  closeFunctionEditor: () => closeFunctionEditor(),
-  exportFile,
   getCanvasMode,
   get gitDiffState() {
     return gitDiffState;
@@ -402,7 +475,7 @@ initWelcome({
   openNewProject: async () => {
     const result = await openNewProjectModal();
     if (result) {
-      openRecentProject(result.root);
+      void openRecentProject(result.root);
     }
   },
   openProject: () => openProject(),
@@ -432,7 +505,10 @@ effect(() => {
     void tab.session.ui.canvasMode;
     void tab.session.ui.editingFunction;
     void tab.session.ui.featureToggles;
+    void tab.session.ui.preview;
+    void tab.session.ui.previewParams;
     void tab.session.ui.settingsTab;
+    void tab.session.ui.showLayout;
     void tab.session.ui.stylebookTab;
     void tab.session.ui.stylebookFilter;
     void tab.session.ui.stylebookCustomizedOnly;
@@ -444,7 +520,6 @@ rightPanelMod.mount({
   getCanvasMode,
   navigateToComponent,
   renderCanvas: () => renderCanvas(),
-  updateForcedPseudoPreview,
 });
 
 leftPanelMod.mount({
@@ -501,8 +576,40 @@ function safeRenderRightPanel() {
 // Now that renderers are registered, bootstrap
 registerFunctionCompletions();
 
+// Collab sessions serialize/parse through the format host when mirroring between the structure
+// Tree and the shared source text, and surface freezes via the status bar.
+configureCollabSerializer(serializeDocument);
+configureCollabParser(async (tab, text) => {
+  if (tab.documentPath && formatForPath(tab.documentPath)) {
+    const parsed = await parseSourceForPath(tab.documentPath, text);
+    return { document: parsed.document as JxMutableNode, frontmatter: parsed.frontmatter };
+  }
+  return { document: JSON.parse(text) as JxMutableNode };
+});
+configureCollabNotifier(statusMessage);
+
+let fsUnsub: (() => void) | null = null;
+/** (Re)subscribe the sidebar to backend filesystem events for the active project. */
+function ensureFsSync() {
+  fsUnsub?.();
+  fsUnsub = startFsSync({ onContentChange: reloadCleanTab, renderLeftPanel });
+}
+
 const _urlParams = new URLSearchParams(location.search);
 const _projectParam = _urlParams.get("project") || _urlParams.get("open");
+
+if (!_projectParam) {
+  // Electrobun (and other non-?project= hosts) load their project over RPC, so the ?project= branch
+  // Below — which is the only place that calls platform.activate() — is skipped. Kick off activate()
+  // Here UNCONDITIONALLY so this window's loopback canvasUrl is fetched on boot (the canvas iframe
+  // Needs it); a render() once it resolves lets ensureHost swap an early default iframe for the
+  // Loopback one (see iframe-host ensureHost's canvasUrl-changed rebuild).
+  const _bootPlatform = getPlatform();
+  // oxlint-disable-next-line unicorn/prefer-top-level-await -- fire-and-forget: must not block the initial render
+  void _bootPlatform.activate?.()?.then(() => {
+    render();
+  });
+}
 
 if (_projectParam) {
   // ?project= mode: skip normal loadProject, set up site context from the path
@@ -517,7 +624,7 @@ if (_projectParam) {
     render();
     const platform = getPlatform();
     // oxlint-disable-next-line unicorn/prefer-top-level-await -- deliberate fire-and-forget: project probing must not block the initial render
-    (async () => {
+    void (async () => {
       try {
         const siteCtx = platform.resolveSiteContext
           ? await platform.resolveSiteContext(_projectParam)
@@ -546,6 +653,8 @@ if (_projectParam) {
             selectedPath: siteCtx.fileRelPath || null,
           });
 
+          await autoSyncProjectOnOpen();
+          await ensureDependenciesInstalled();
           await loadComponentRegistry();
 
           // Load directory tree and populate projectDirs from conventional dirs found
@@ -570,6 +679,7 @@ if (_projectParam) {
             }
           }
           requireProjectState().projectDirs = foundDirs;
+          void maybePromptJxsuiteUpdate(siteCtx.sitePath);
         }
 
         // Read and open the file
@@ -610,14 +720,14 @@ if (_projectParam) {
             ({ frontmatter } = result);
             parsedMode = result.mode;
           } else {
-            parsedDoc = JSON.parse(content);
+            parsedDoc = JSON.parse(content) as JxMutableNode;
           }
 
           // Open in a tab
           openTab({
             id: fileRelPath,
             documentPath: fileRelPath,
-            document: parsedDoc,
+            document: parsedDoc as JxMutableNode,
             ...(frontmatter != null && { frontmatter }),
             sourceFormat: fileFormat?.name ?? null,
           });
@@ -639,9 +749,32 @@ if (_projectParam) {
   }
 } else {
   // Normal mode: probe for project at server root
-  loadProject();
+  void loadProject();
   render();
+  ensureFsSync();
 }
+
+// Hydrate the recent-projects list from the backend store (desktop/chromium), then refresh the
+// Toolbar dropdown + welcome screen, both of which read it synchronously.
+// oxlint-disable-next-line unicorn/prefer-top-level-await -- deliberate fire-and-forget: hydration must not block initial render
+void hydrateRecentProjects().then(() => {
+  toolbarPanel.render();
+  render();
+});
+
+// Hydrate the platform's project catalogue (dev server sites, cloud projects), then refresh the
+// Welcome screen, which reads it synchronously. No-op on platforms without listProjects.
+// oxlint-disable-next-line unicorn/prefer-top-level-await -- deliberate fire-and-forget: hydration must not block initial render
+void hydrateProjectList().then(() => {
+  render();
+});
+
+// Hydrate user settings (AI connection parameters) from the backend store, then re-render so
+// Key-gated surfaces (assistant gate, New Project Import/Agent tabs) see the stored key.
+// oxlint-disable-next-line unicorn/prefer-top-level-await -- deliberate fire-and-forget: hydration must not block initial render
+void hydrateSettings().then(() => {
+  render();
+});
 
 // ─── Left panel: delegated to panels/left-panel.js ───────────────────────────
 
@@ -652,18 +785,42 @@ function renderLeftPanel() {
 function loadProject() {
   return _loadProject();
 }
-function openProject() {
-  return _openProject({
+async function openProject() {
+  const result = await _openProject({
     renderActivityBar: () => renderActivityBar(),
     renderLeftPanel,
   });
+  ensureFsSync();
+  return result;
 }
 async function openRecentProject(root: string) {
   try {
     const platform = getPlatform();
+
+    // Multi-window (desktop): if this window already holds a project, open the chosen one in a new
+    // Window (focusing an existing window if it's already open) rather than replacing this project.
+    if (projectState && platform.openProjectInNewWindow) {
+      await platform.openProjectInNewWindow(root);
+      return;
+    }
+
+    // Multi-window (desktop): bind THIS window's backend to the project before reading from it. If
+    // The project is already open in another window, that window is focused and we bail here.
+    if (platform.setWindowProject) {
+      const res = await platform.setWindowProject(root);
+      if (res.deduped) {
+        return;
+      }
+    }
+
     platform.projectRoot = root;
+    // The format registry is cached per project — the previous root's registry (often empty on a
+    // Fresh desktop launch) must not answer for this project, or non-JSON documents fail with
+    // "No format class imported" until a reload. Mirrors openProject in files.ts.
+    refreshFormats();
+    void loadFormats();
     const content = await platform.readFile("project.json");
-    const config = JSON.parse(content);
+    const config = JSON.parse(content) as ProjectConfig;
 
     closeAllTabs();
 
@@ -672,13 +829,15 @@ async function openRecentProject(root: string) {
       dirs: new Map(),
       expanded: new Set(),
       isSiteProject: true,
-      name: config.name || root.split("/").pop(),
+      name: config.name || root.split("/").pop()!,
       projectConfig: config,
       projectRoot: root,
       searchQuery: "",
       selectedPath: null,
     });
 
+    await autoSyncProjectOnOpen();
+    await ensureDependenciesInstalled();
     await loadDirectory(".");
     await loadComponentRegistry();
 
@@ -706,7 +865,14 @@ async function openRecentProject(root: string) {
     statusMessage(`Opened project: ${requireProjectState().name}`);
 
     await openHomePage();
+    ensureFsSync();
+    void maybePromptJxsuiteUpdate(root);
   } catch (error) {
+    // The project likely moved or was deleted — drop the stale entry so it stops cluttering the
+    // List, and refresh the dropdown + welcome screen.
+    removeRecentProject(root);
+    toolbarPanel.render();
+    render();
     statusMessage(`Error: ${errorMessage(error)}`);
   }
 }
@@ -725,18 +891,6 @@ function openFileFromTree(path: string) {
 initShortcuts(() => ({
   applyTransform,
   canvasMode: getCanvasMode(),
-  componentInlineEdit: view.componentInlineEdit,
-  enterEditOnPath(path) {
-    requestAnimationFrame(() => {
-      const activePanel = getActivePanel();
-      if (activePanel) {
-        const el = findCanvasElement(path, activePanel.canvas);
-        if (el && isEditableBlock(el)) {
-          enterInlineEdit(el, path);
-        }
-      }
-    });
-  },
   openProject,
   panX: view.panX,
   panY: view.panY,

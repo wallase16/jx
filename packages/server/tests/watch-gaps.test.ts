@@ -47,18 +47,26 @@ describe("createWatcher — rebuild integration", () => {
 
       writeFileSync(join(dir, "entry.js"), `export const v = ${Date.now()};`);
 
-      const { value } = (await Promise.race([
-        reader.read(),
-        new Promise((_, reject) => {
-          setTimeout(() => reject(new Error("timeout waiting for reload")), 3000);
-        }),
-      ])) as ReadableStreamReadResult<Uint8Array>;
-      expect(new TextDecoder().decode(value)).toContain("data: reload");
+      // Read SSE frames until the reload arrives — a named fs event may be interleaved first.
+      const decoder = new TextDecoder();
+      let reloaded = false;
+      while (!reloaded) {
+        const { value } = (await Promise.race([
+          reader.read(),
+          new Promise((_, reject) => {
+            setTimeout(() => reject(new Error("timeout waiting for reload")), 3000);
+          }),
+        ])) as ReadableStreamReadResult<Uint8Array>;
+        if (value && decoder.decode(value).includes("data: reload")) {
+          reloaded = true;
+        }
+      }
+      expect(reloaded).toBe(true);
 
       // The rebuild actually produced output
       const outputs = [...new Bun.Glob("*.js").scanSync({ cwd: join(dir, "out") })];
       expect(outputs.length).toBeGreaterThan(0);
-      reader.cancel();
+      void reader.cancel();
       await watcher.close();
       await sleep(100);
     } finally {
@@ -107,8 +115,14 @@ describe("createWatcher — rebuild integration", () => {
           setTimeout(() => r("silent"), 300);
         }),
       ]);
-      expect(raced).toBe("silent");
-      reader.cancel();
+      // The sidebar still receives a (named) fs event, but the preview must NOT be told to reload.
+      if (raced !== "silent") {
+        const text = new TextDecoder().decode(
+          (raced as ReadableStreamReadResult<Uint8Array>).value ?? new Uint8Array(),
+        );
+        expect(text).not.toContain("data: reload");
+      }
+      void reader.cancel();
       await watcher.close();
       // Drain any pending debounce timer before restoring Bun.build
       await sleep(150);
@@ -141,10 +155,45 @@ describe("createWatcher — rebuild integration", () => {
           setTimeout(() => r("silent"), 400);
         }),
       ]);
-      expect(raced).toBe("silent");
-      reader.cancel();
+      // The sidebar still receives a (named) fs event, but the preview must NOT be told to reload.
+      if (raced !== "silent") {
+        const text = new TextDecoder().decode(
+          (raced as ReadableStreamReadResult<Uint8Array>).value ?? new Uint8Array(),
+        );
+        expect(text).not.toContain("data: reload");
+      }
+      void reader.cancel();
       await watcher.close();
       await sleep(100);
+    } finally {
+      rmSync(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("swallows transient EINVAL watch errors but logs the rest", async () => {
+    const dir = setup("watch-errors");
+    try {
+      const { watcher } = createWatcher(dir, [], { debounce: 10 });
+      await waitReady(watcher);
+      const emit = (watcher as unknown as { emit: (e: string, a: unknown) => void }).emit.bind(
+        watcher,
+      );
+
+      const logged: unknown[][] = [];
+      const origError = console.error;
+      console.error = (...args: unknown[]) => void logged.push(args);
+      try {
+        // EINVAL on transient Bun test dirs is expected churn — silently ignored.
+        emit("error", new Error("EINVAL: invalid argument, watch"));
+        expect(logged).toHaveLength(0);
+        // Any other error is surfaced to the console.
+        emit("error", new Error("EACCES: permission denied"));
+        expect(logged).toHaveLength(1);
+      } finally {
+        console.error = origError;
+      }
+      await watcher.close();
+      await sleep(50);
     } finally {
       rmSync(dir, { force: true, recursive: true });
     }
