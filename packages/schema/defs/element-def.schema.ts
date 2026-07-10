@@ -13,7 +13,9 @@ export const attributesObjectSchema = {
 
 export const propsObjectSchema = {
   additionalProperties: {
-    oneOf: [
+    // AnyOf, not oneOf: a { "$ref": "..." } value is simultaneously a plain object AND a
+    // RefObject, so oneOf's exactly-one constraint made every ref-valued prop invalid.
+    anyOf: [
       { type: "string" },
       { type: "number" },
       { type: "boolean" },
@@ -39,7 +41,7 @@ export const elementPropertyValueSchema = {
 export const switchDefSchema = {
   additionalProperties: false,
   description: "Reactive $ref that drives which case to render.",
-  properties: { $ref: { $ref: "#/$defs/InternalRef" } },
+  properties: { $ref: { $ref: "#/$defs/StateRef" } },
   required: ["$ref"],
   type: "object",
 } as const;
