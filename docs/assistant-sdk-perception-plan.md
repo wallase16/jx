@@ -1,11 +1,13 @@
 # Assistant SDK + Canvas-Awareness — Plan
 
-**Status:** Phase 0 (spec authoring) not yet started — this doc is the plan of record
-**Date:** 2026-07-09
+**Status:** Phases 0–1 complete — `specs/ai-assistant.md` is authored; eval hardening done
+(19/19 headless, worst-of-3). Phase 2 (seam extraction) is next.
+**Date:** 2026-07-10
 **Owner:** Gideon
 **Branch:** `feat/assistant-sdk-spec` (off `upstream/main`)
-**Relates to:** `specs/ai-assistant.md` (to be authored — this plan's Phase 0 output),
-`docs/strategy-brief.md`, `docs/ai-assistant-headless-harness.md`,
+**Relates to:** `specs/ai-assistant.md` (this plan's Phase 0 output — done),
+`docs/strategy-brief.md`, `docs/ai-assistant-headless-harness.md` (Phase 1 output — done, now
+committed on this branch along with the rest of the `docs/ai-assistant-*.md` family),
 `packages/studio/src/services/{ai-tools,tool-executor,ai-system-prompt}.ts`,
 `packages/studio/src/canvas/iframe-protocol.ts`, `specs/extensions.md`
 
@@ -113,15 +115,16 @@ consumers are already solved: `/__studio/ai/chat` proxy + managed mode, or
 
 ## Phases
 
-- **Phase 0 — Spec:** author `specs/ai-assistant.md` here (port + revise the old local spec;
-  §11 → "Packages & the AssistantHost seam", add perception + SDK/API sections, fold the
-  roadmap into §12). Doc-only; the deliverable of the current planning cycle.
-- **Phase 1 — Eval hardening:** commit the `score.ts` `toRaw` fix (salvage from the eval
-  worktree); port the local-only `docs/ai-assistant-*.md` family + 5 local-only example
-  fixtures (`card-with-observed-attrs`, `dynamic-task-list`, `user-profile`, `page-shell`,
-  `blog/[slug]` — they double as few-shot sources); close L3.4/L5.3 with few-shot exemplars
-  in the system prompt; recalibrate the Recovery axis with injected faults. Gate: 17/17
-  headless.
+- **Phase 0 — Spec: done.** Authored `specs/ai-assistant.md` (port + revise the old local
+  spec; §11 → "Packages & the AssistantHost seam", §12 perception, §13 SDK vs API, §14 folds
+  the roadmap). Doc-only.
+- **Phase 1 — Eval hardening: done.** The `score.ts` `toRaw` fix was already committed
+  (`0ebd74a4`) before this phase started. Ported the `docs/ai-assistant-*.md` family + the 5
+  example fixtures. L3.4/L5.3 closed — L5.3's root cause was a real schema/runtime mismatch
+  ($switch), not a prompt gap; L3.4 needed one system-prompt rule (semantic HTML), not a
+  few-shot rewrite. Recovery axis recalibrated with a new injected-fault test (L4.6). Gate:
+  **19/19 headless** (worst-of-3, 18 original tests + L4.6). Full turnover:
+  `docs/ai-assistant-headless-harness.md` §6.
 - **Phase 2 — Seam extraction:** create `packages/assistant`, move the modules, convert
   studio + harness to host impls. Pure refactor; eval parity is the gate.
 - **Phase 3 — Perception (launch milestone):** protocol messages, `perception-host.ts`,
@@ -152,3 +155,74 @@ consumers are already solved: `/__studio/ai/chat` proxy + managed mode, or
   after fixing the `score.ts` clone bug), designed the `AssistantHost` + perception
   architecture, evaluated package shape (→ new `@jxsuite/assistant`). No code written yet.
   Next: Phase 0, author `specs/ai-assistant.md` on this branch.
+- **2026-07-09 — Phase 0 done.** Authored `specs/ai-assistant.md` (14 sections, ~880 lines).
+  Read every source file the spec makes claims about (`ai-tools.ts`, `tool-executor.ts`,
+  `ai-system-prompt.ts`, `document-assistant.ts`, `context-manager.ts`, `jx-validate.ts`,
+  `render-critic.ts`, `token-lint.ts`, `ai-settings.ts`, `ai-session-store.ts`, all of
+  `packages/ai/src/`, `packages/server/src/ai-api.ts`, `canvas/iframe-protocol.ts`,
+  `panels/ai-panel.ts` + `panels/ai-chat/*`, `specs/extensions.md` §2/§6,
+  `tests/harness/real-llm.ts`) rather than trusting the old draft or the plan's own summaries.
+  Found and corrected real drift from the old local spec, not just cosmetic updates:
+  - **§3 Chat Panel UX was wrong at the architecture level.** The old spec described a
+    resizable bottom panel with an overlay fallback below 900px and a `Ctrl+L` shortcut —
+    none of that exists. The assistant is actually a tab in the **right panel**
+    (`right-panel.ts`) alongside Properties/Events/Style, with its own key-gate → sessions ↔
+    chat view-state machine (`ai-panel.ts`). Rewrote §3 from the real component tree.
+  - **Session persistence is multi-session, not single-conversation** — `ai-session-store.ts`
+    (project-scoped index + one payload key per session, 20-session cap) postdates the old
+    spec's single `localStorage` key design. §7.2 rewritten accordingly.
+  - **The batched Accept/Reject diff preview was already superseded** by optimistic apply
+    before the old spec was even written (its own §8 said so) — kept as §8.2 "superseded, for
+    reference" only, per the old doc's own framing.
+  - The `score.ts` `structuredClone`/`toRaw` fix that Phase 1 is chartered to "salvage from the
+    eval worktree" **is already committed** on this branch (`0ebd74a4`) — noted in both the
+    Phases list above and §14.1 of the spec so Phase 1 doesn't re-derive it.
+  - `docs/strategy-brief.md` and `docs/ai-assistant-headless-harness.md` (cited under _Relates
+    to_ above) don't exist in this worktree — they live on `feat/ai-assistant-stack-b-v2` and a
+    separate local clone at `/home/gideon/Dev/jx`. Read both for grounding (confirmed the
+    `AssistantHost`/perception rationale and the harness's real file layout match what's
+    described here) without copying them in — that copy is explicitly Phase 1's job.
+  - New §12 (Perception) and §13 (SDK vs API) are clearly labeled **not yet built** — every
+    interface in them (`PerceptionCapability`, the `enumerate`/`renderedTree`/`highlight`
+    protocol messages) is a Phase 3 target, cross-checked against what `iframe-protocol.ts`
+    already has (`measure`/`geometry` exists; bulk enumerate doesn't) so the target isn't
+    invented from nothing.
+  - Ran `oxfmt specs/ai-assistant.md` clean (twice, after a manual diagram touch-up).
+    Next: Phase 1 — eval hardening (port the `docs/ai-assistant-*.md` family + 5 fixtures from
+    the old branches, close L3.4/L5.3, recalibrate Recovery). The `toRaw` fix sub-item is
+    already done; scope Phase 1's kickoff to the rest.
+- **2026-07-10 — Phase 1 done.** Full turnover in `docs/ai-assistant-headless-harness.md` §6;
+  summary here. Ran the eval suite cold first rather than trusting the plan's stated 15/17 —
+  found L5.3 genuinely failing (L3.4 passed single-run but flaked under worst-of-3). Both
+  turned out to be real bugs, not prompt gaps:
+  - **L5.3 root cause:** `$switch` was unbuildable — two orphaned-wiring bugs in
+    `packages/schema` (`SwitchNode` never wired into the children-array union; `switchDefSchema`
+    required an `InternalRef` `$ref` instead of `StateRef`). These are the exact fixes a
+    `2026-06-20b` session on `feat/ai-assistant-stack-b-v2` already made and verified — they
+    just never reached `upstream/main`. Re-applied them; `examples/components/router.json`
+    (previously invalid on this branch) now validates.
+  - **A second schema bug, not previously known**, surfaced while porting the 5 example
+    fixtures: `dynamic-task-list.json` failed on a `PropsObject` `oneOf` ambiguity (a
+    `{ "$ref": ... }` prop value is simultaneously a plain object and a `RefObject`, so
+    `oneOf`'s exactly-one constraint rejected every ref-valued prop) — this is the very bug
+    `docs/ai-assistant-decision.md` §6b flagged as a known-but-unfixed upstream issue. Fixed
+    (`oneOf` → `anyOf`). `examples/pages/blog/[slug].json` stays invalid (unrelated
+    Markdown-content-pipeline gap, out of scope, ported as-is and flagged).
+  - **L3.4 root cause:** not a bug — the model just wasn't reliably reusing the semantic `<nav>`
+    convention already visible in `nav-bar.json`'s "Available Components" context. One new
+    `DESIGN_PRINCIPLES` rule (Semantic HTML) fixed it; 3/3 after.
+  - **Recovery recalibration:** added `L4.6`, a deterministic injected fault (an `update_state`
+    call on a fixture with no `state` object at all, guaranteed to hit `{ success: false }`)
+    distinct in kind from L4.5's path-based fault — Recovery axis now has two independent,
+    reliable exercises instead of one.
+  - Gate: **19/19 Completeness 5** at worst-of-3 (18 original + L4.6). `bun run typecheck` /
+    `bun run lint` clean; `packages/studio` 3670/3670; `packages/schema` 115/115 at 100%
+    coverage. One flake logged, not chased: L5.2 scored Undo 1 on one of three runs
+    (non-deterministic, batch-size-correlated, and Undo is an explicitly browser-owned
+    partial-signal axis in `score.ts` by design) — flagged for whoever next touches
+    `beginBatch`/`endBatch` (candidate: Phase 2, since batching moves into `AssistantHost`).
+  - Docs family (`ai-assistant-{decision,testing-plan,premium-components-plan,headless-harness}.md`)
+    and the 5 example fixtures are now committed on this branch, ported from
+    `feat/ai-assistant-stack-b-v2` with provenance notes at the top of each.
+  - Next: Phase 2 — seam extraction into `packages/assistant` per `specs/ai-assistant.md` §11
+    (pure refactor; eval parity — re-run this same 19-test gate — is the acceptance bar).
