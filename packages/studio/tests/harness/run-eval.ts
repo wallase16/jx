@@ -243,6 +243,22 @@ const TESTS: EvalTest[] = [
     mustReadFirst: true,
     check: (d) => textOf(d).includes("recovered"),
   },
+  // Injected fault, distinct failure class from L4.1/L4.5 (both path-based): "Update" is a
+  // Deliberately natural instruction for a state key that provably does not exist on the
+  // Fixture (sites/test-blank/pages/index.json has no `state` object at all), so a model
+  // That follows its own tool-naming convention (update_state for existing keys) hits a
+  // Guaranteed { success: false } from ai-tools.ts before any schema check runs. Recovery
+  // Means noticing the error and falling back to add_state (or correcting course some other
+  // Way) to still reach the goal state.
+  {
+    id: "L4.6",
+    prompt: "Update the state variable 'recoveryTest' to the value 'recovered'.",
+    // No mustReadFirst: a state key has no document path to discover (mirrors L5.1-L5.3, which
+    // Also create/target state without a read_document prerequisite).
+    check: (d) =>
+      d.state?.recoveryTest === "recovered" ||
+      JSON.stringify(d.state?.recoveryTest ?? "").includes("recovered"),
+  },
 
   // ── Layer 5: state & signals (advanced). Assertions check structural markers (state object,
   // $map/$switch) on the page or the written component. ──

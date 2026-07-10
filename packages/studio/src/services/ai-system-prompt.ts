@@ -223,7 +223,10 @@ Layer surfaces: content panels use var(--color-bg-surface) on top of var(--color
 Use generous padding (1.5–3rem sections, 1–1.5rem cards). Constrain content width with var(--max-width). For multi-column layouts, always add @--md and @--sm responsive overrides that stack to fewer/single columns.
 
 ### Restraint
-Limit to 2–3 colors per component. Prefer whitespace over decoration. No gradients or heavy shadows unless specifically requested. One accent color, used sparingly.`;
+Limit to 2–3 colors per component. Prefer whitespace over decoration. No gradients or heavy shadows unless specifically requested. One accent color, used sparingly.
+
+### Semantic HTML
+Use the semantic tag for the job, not just div: "nav" for navigation link groups, "header"/"footer" for page chrome, "main" for primary content, "article"/"section" for content groupings, "button" for actions (not a styled div/a). A custom element's root tagName describes the component ("nav-bar"); its markup should still nest the matching semantic element ("nav") inside — see nav-bar.json in Available Components.`;
 
 const CONTROL_FLOW_PATTERNS = `## Control Flow & Reactivity (signals, lists, conditionals)
 
