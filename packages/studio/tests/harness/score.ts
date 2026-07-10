@@ -10,6 +10,7 @@
  */
 
 import { undo, redo } from "../../src/tabs/transact";
+import { toRaw } from "../../src/reactivity";
 import { validateDoc } from "../../src/services/jx-validate";
 import type { Tab } from "../../src/tabs/tab";
 import type { buildRealHarness } from "./real-llm";
@@ -185,7 +186,7 @@ export async function scoreRun({
 
 /** Deep-clone the live doc out of the reactive proxy for validation/comparison. */
 function rawDoc(tab: Tab) {
-  return structuredClone(tab.doc.document);
+  return structuredClone(toRaw(tab.doc.document));
 }
 
 /**
