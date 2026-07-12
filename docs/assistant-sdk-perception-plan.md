@@ -1,8 +1,9 @@
 # Assistant SDK + Canvas-Awareness — Plan
 
-**Status:** Phases 0–1 complete — `specs/ai-assistant.md` is authored; eval hardening done
-(19/19 headless, worst-of-3). Phase 2 (seam extraction) is next.
-**Date:** 2026-07-10
+**Status:** Phases 0–2 complete — `specs/ai-assistant.md` is authored; eval hardening done
+(19/19 headless, worst-of-3); seam extraction done (`packages/assistant` +
+`AssistantHost`, same 19/19 gate held). Phase 3 (perception, launch milestone) is next.
+**Date:** 2026-07-12
 **Owner:** Gideon
 **Branch:** `feat/assistant-sdk-spec` (off `upstream/main`)
 **Relates to:** `specs/ai-assistant.md` (this plan's Phase 0 output — done),
@@ -125,8 +126,12 @@ consumers are already solved: `/__studio/ai/chat` proxy + managed mode, or
   few-shot rewrite. Recovery axis recalibrated with a new injected-fault test (L4.6). Gate:
   **19/19 headless** (worst-of-3, 18 original tests + L4.6). Full turnover:
   `docs/ai-assistant-headless-harness.md` §6.
-- **Phase 2 — Seam extraction:** create `packages/assistant`, move the modules, convert
-  studio + harness to host impls. Pure refactor; eval parity is the gate.
+- **Phase 2 — Seam extraction: done.** Created `packages/assistant` (`@jxsuite/assistant`);
+  moved `tools.ts`, `system-prompt.ts`, `agent-loop.ts`, `context-manager.ts`, `validate.ts`,
+  `token-lint.ts` behind the `AssistantHost` interface from `specs/ai-assistant.md` §11.3.
+  Converted studio's `document-assistant.ts` and the headless eval harness
+  (`tests/harness/real-llm.ts`) to the two reference host implementations. Gate: **19/19
+  headless** (worst-of-3), exact parity with the pre-refactor baseline. Full turnover below.
 - **Phase 3 — Perception (launch milestone):** protocol messages, `perception-host.ts`,
   three tools, auto-selection context, highlight feedback; new L6 eval layer (mock
   `PerceptionCapability` with preset selection — "make THIS button larger" asserts the
@@ -226,3 +231,52 @@ consumers are already solved: `/__studio/ai/chat` proxy + managed mode, or
     `feat/ai-assistant-stack-b-v2` with provenance notes at the top of each.
   - Next: Phase 2 — seam extraction into `packages/assistant` per `specs/ai-assistant.md` §11
     (pure refactor; eval parity — re-run this same 19-test gate — is the acceptance bar).
+- **2026-07-12 — Phase 2 done.** Created `packages/assistant` (`@jxsuite/assistant`) and moved
+  `tools.ts` (from `ai-tools.ts`), `system-prompt.ts` (from `ai-system-prompt.ts`),
+  `agent-loop.ts` (from `tool-executor.ts`), `context-manager.ts`, `validate.ts` (from
+  `jx-validate.ts`), `token-lint.ts` behind a new `host.ts` `AssistantHost` interface, matching
+  the §11.3 sketch with three deliberate additions the sketch's own "mapping notes" flagged as
+  implementer's-judgment: `document.setText(path, value)` (couldn't be expressed via
+  `updateProperty`), `document.isBatching()` (so `open_document` can replicate the
+  flush-and-reopen-batch behavior mid-loop), and `files` bundling `saveFile`+`openDocument`
+  together rather than independently optional. `system-prompt.ts` absorbs `VOID_ELEMENTS`/
+  `flattenTree` as independent copies (studio keeps its own — small deliberate duplication, per
+  §11.2). `buildSystemPrompt` gained an optional `capabilities` param producing a terse
+  "Environment Capabilities" section, wired live in both hosts, omitted (byte-identical output)
+  when not passed.
+  - Studio's `document-assistant.ts` and the eval harness (`tests/harness/real-llm.ts`) are now
+    the two reference `AssistantHost` implementations — both build `document.*` from the same
+    `transactDoc()`-wrapped `tabs/transact.ts` mutators and `toRaw()` before returning the
+    document, so undo/redo and the `0ebd74a4`-class reactive-proxy bug are structurally
+    prevented rather than re-introduced.
+  - `runAgentLoop` now unconditionally calls `host.document.beginBatch()`/`endBatch()` (the old
+    optional `getTab?` is gone) — already true in production, but new for the eval harness,
+    which previously ran unbatched; verified this doesn't change `score.ts`'s Undo/Redo axis
+    (collapsing multi-mutation turns into one history entry vs. N doesn't affect the undo-walk
+    assertion). The L5.2 Undo flake logged in the Phase 1 entry above did not reproduce on this
+    run.
+  - New package: 73 tests, `bunfig.toml` coverage thresholds `lines=0.98, functions=0.99`
+    (achieved 99.44%/100%), added to `.github/workflows/test.yml`'s matrix and
+    `scripts/check-coverage-manifest.ts` (with `host.ts` in the type-only allowlist).
+    `packages/studio` lost `ajv`/`ajv-formats` as direct deps (moved to `@jxsuite/assistant`)
+    and gained `../assistant/**` in its own `coveragePathIgnorePatterns`.
+  - Test porting: `ai-tools.test.ts`, `ai-system-prompt.test.ts`, `ai-loop.test.ts`,
+    `context-manager.test.ts`, `jx-validate-smoke.test.ts`, `token-lint.test.ts` moved to
+    `packages/assistant/tests/` and rewritten against a new fake `AssistantHost`
+    (`tests/fake-host.ts`) instead of real `createTab`/`transactDoc`. `render-critic.test.ts`
+    and a new `document-assistant.test.ts` stayed studio-side as integration tests of the studio
+    host wiring itself (not re-testing tool logic, which now lives in `packages/assistant`).
+  - Gate: **19/19 headless** (worst-of-3, gpt-5.4) — exact parity with the Phase 1 baseline.
+    `bun run lint` / `bun run typecheck` clean repo-wide; `packages/assistant` 73/73;
+    `packages/studio` 3613/3613; both coverage manifests pass. Work was done by a
+    worktree-isolated background agent per a fully-specified design (interface shape + file
+    mapping written up-front in this session), then independently re-verified in this worktree
+    (lint/typecheck/both test suites/both manifests re-run cold, not just trusted from the
+    agent's transcript) before merging — only `eval:headless` itself was trusted from the
+    agent's run rather than repeated, to avoid a second real-API-cost pass.
+  - Next: Phase 3 — perception (the launch milestone). §12 in full: `PerceptionCapability`
+    (`getSelection`/`getRenderedTree`/`measure`/optional `highlight`), iframe-protocol
+    `enumerate`/`renderedTree`/`highlight` messages, `packages/studio/src/canvas/
+perception-host.ts`, three new tools (`get_selection`, `describe_canvas`, `measure_nodes`),
+    automatic selection context on send, post-tool highlight feedback, and a new L6 eval layer
+    (mock `PerceptionCapability`, selection-targeting + component-detection assertions).
