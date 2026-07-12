@@ -1,9 +1,10 @@
 /**
- * Ai-tools.js — Jx document manipulation tools for the AI assistant
+ * Tools.js — Jx document manipulation tools for the AI assistant
  *
- * Concrete `.jx` AST tools registered into a `@jxsuite/ai` ToolRegistry. Each tool wraps an
- * existing `transactDoc()` mutation helper so AI edits get the same undo/redo history as manual
- * edits (ADR docs/ai-assistant-decision.md §5 — optimistic apply + undo).
+ * Concrete `.jx` AST tools registered into a `@jxsuite/ai` ToolRegistry. Each tool calls through the
+ * injected `AssistantHost` — never `tabs/transact`/`Tab` directly — so edits get the same undo/redo
+ * history as manual edits in whichever host wires this package up (ADR
+ * docs/ai-assistant-decision.md §5 — optimistic apply + undo; specs/ai-assistant.md §11.3).
  *
  * @license MIT
  */
@@ -11,22 +12,8 @@
 import { createToolDefinition } from "@jxsuite/ai/tools";
 import type { ToolRegistry, ToolResult } from "@jxsuite/ai/tools";
 import type { JxMutableNode, JxPath, JxStateDefinition } from "@jxsuite/schema/types";
-import { getNodeAtPath } from "../state";
-import { toRaw } from "../reactivity";
-import type { Tab } from "../tabs/tab";
-import {
-  beginBatch,
-  endBatch,
-  isBatching,
-  mutateInsertNode,
-  mutateMoveNode,
-  mutateRemoveNode,
-  mutateUpdateProperty,
-  mutateUpdateStyle,
-  transactDoc,
-} from "../tabs/transact";
-import type { JxNodeValue } from "../tabs/transact";
-import { validateDoc } from "./jx-validate";
+import type { AssistantHost } from "./host";
+import { validateDoc } from "./validate";
 import { flagHardcodedTokens, formatTokenHints } from "./token-lint";
 
 const PATH_DESCRIPTION =
@@ -92,33 +79,29 @@ function translateValidationError(rawError: string): string {
  * introduced (the eval signal — ADR §6b). The change stays applied either way (optimistic apply +
  * undo, ADR §5); reporting the errors lets the agent loop self-correct on the next round.
  *
- * When a renderCheck function is provided, a second gate runs after schema validation passes: the
- * mutated document is rendered in a detached DOM context and any render-time throws are surfaced as
+ * When the host has a `renderCheck` capability, a second gate runs after schema validation passes:
+ * the mutated document is rendered in a detached context and any render-time throws are surfaced as
  * tool errors (same contract as schema errors).
  *
- * @param {import("../tabs/tab").Tab} tab
- * @param {(t: import("../tabs/tab").Tab) => void} mutationFn
+ * @param {AssistantHost} host
+ * @param {() => void} mutationFn - Performs one `host.document.*` mutation.
  * @param {string} summary
  * @param {(doc: unknown) => Promise<string[]>} validate
- * @param {((doc: unknown) => Promise<{ ok: true } | { ok: false; error: string }>) | undefined} renderCheck
- * @param {Record<string, string> | undefined} projectStyle
- * @returns {Promise<import("@jxsuite/ai/tools").ToolResult>}
+ * @returns {Promise<ToolResult>}
  */
 async function applyAndValidate(
-  tab: Tab,
-  mutationFn: (t: Tab) => void,
+  host: AssistantHost,
+  mutationFn: () => void,
   summary: string,
   validate: (doc: unknown) => Promise<string[]>,
-  renderCheck: ((doc: unknown) => Promise<{ ok: true } | { ok: false; error: string }>) | undefined,
-  projectStyle: Record<string, string> | undefined,
 ): Promise<ToolResult> {
-  const rawBefore = toRaw(tab.doc.document);
+  const rawBefore = host.document.getDocument();
   const before = new Set(await validate(rawBefore));
-  const renderOkBefore = renderCheck ? await renderCheck(rawBefore) : { ok: true };
+  const renderOkBefore = host.renderCheck ? await host.renderCheck(rawBefore) : { ok: true };
 
-  transactDoc(tab, mutationFn);
+  mutationFn();
 
-  const rawAfter = toRaw(tab.doc.document);
+  const rawAfter = host.document.getDocument();
   const after = await validate(rawAfter);
   const newErrors = after.filter((e) => !before.has(e));
   if (newErrors.length > 0) {
@@ -129,8 +112,8 @@ async function applyAndValidate(
     };
   }
 
-  if (renderCheck && renderOkBefore.ok) {
-    const renderResult = await renderCheck(rawAfter);
+  if (host.renderCheck && renderOkBefore.ok) {
+    const renderResult = await host.renderCheck(rawAfter);
     if (!renderResult.ok) {
       return {
         success: false,
@@ -140,8 +123,9 @@ async function applyAndValidate(
   }
 
   // Soft token-discipline hints (never fail the mutation)
+  const { projectStyle } = host.project ?? {};
   if (projectStyle) {
-    const findings = flagHardcodedTokens(rawAfter, projectStyle);
+    const findings = flagHardcodedTokens(rawAfter as JxMutableNode, projectStyle);
     const hints = formatTokenHints(findings);
     if (hints) {
       return { success: true, summary: `${summary}\n\n${hints}` };
@@ -152,36 +136,17 @@ async function applyAndValidate(
 }
 
 /**
- * Register the document-manipulation tools into a tool registry.
+ * Register the document-manipulation tools into a tool registry. Every tool is always registered; a
+ * tool whose backing host capability is absent (`host.files`, `host.renderCheck`) returns `{
+ * success: false, error: "<X> is not available in this environment." }` at call time rather than
+ * being omitted, so the model always sees the same tool list (§11.3).
  *
- * @param {import("@jxsuite/ai/tools").ToolRegistry} registry
- * @param {{
- *   getTab: () => import("../tabs/tab").Tab | null;
- *   validate?: (doc: unknown) => Promise<string[]>;
- *   saveFile?: (relPath: string, content: string) => Promise<void>;
- *   renderCheck?: (doc: unknown) => Promise<{ ok: true } | { ok: false; error: string }>;
- *   openDocument?: (path: string) => Promise<void>;
- *   projectStyle?: Record<string, string>;
- * }} ctx
+ * @param {Pick<ToolRegistry, "register">} registry
+ * @param {AssistantHost} host
  */
-export function registerAiTools(
-  registry: Pick<ToolRegistry, "register">,
-  {
-    getTab,
-    validate = validateDoc,
-    saveFile,
-    renderCheck,
-    openDocument,
-    projectStyle,
-  }: {
-    getTab: () => Tab | null;
-    validate?: (doc: unknown) => Promise<string[]>;
-    saveFile?: (relPath: string, content: string) => Promise<void>;
-    renderCheck?: (doc: unknown) => Promise<{ ok: true } | { ok: false; error: string }>;
-    openDocument?: (path: string) => Promise<void>;
-    projectStyle?: Record<string, string> | undefined;
-  },
-) {
+export function registerAiTools(registry: Pick<ToolRegistry, "register">, host: AssistantHost) {
+  const validate = host.validation?.validate ?? validateDoc;
+
   registry.register(
     createToolDefinition({
       name: "read_document",
@@ -200,13 +165,12 @@ export function registerAiTools(
         required: [],
       },
       execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        const doc = host.document.getDocument();
+        if (!doc) {
           return { success: false, error: "No document is open." };
         }
         const { path } = args as { path?: JxPath };
-        const node =
-          path && path.length > 0 ? getNodeAtPath(tab.doc.document, path) : tab.doc.document;
+        const node = path && path.length > 0 ? host.document.getNodeAtPath(path) : doc;
         if (node === undefined) {
           return { success: false, error: `No node exists at path ${JSON.stringify(path)}.` };
         }
@@ -244,22 +208,19 @@ export function registerAiTools(
         required: ["path", "key"],
       },
       async execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        if (!host.document.getDocument()) {
           return { success: false, error: "No document is open." };
         }
-        const { path, key, value } = args as { path: JxPath; key: string; value?: JxNodeValue };
-        const node = getNodeAtPath(tab.doc.document, path);
+        const { path, key, value } = args as { path: JxPath; key: string; value?: unknown };
+        const node = host.document.getNodeAtPath(path);
         if (node === undefined) {
           return { success: false, error: `No node exists at path ${JSON.stringify(path)}.` };
         }
         return applyAndValidate(
-          tab,
-          (t) => mutateUpdateProperty(t, path, key, value ?? undefined),
+          host,
+          () => host.document.updateProperty(path, key, value ?? undefined),
           `Set "${key}" at ${JSON.stringify(path)}.`,
           validate,
-          renderCheck,
-          projectStyle,
         );
       },
     }),
@@ -290,8 +251,7 @@ export function registerAiTools(
         required: ["parentPath", "index", "node"],
       },
       async execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        if (!host.document.getDocument()) {
           return { success: false, error: "No document is open." };
         }
         const {
@@ -303,7 +263,7 @@ export function registerAiTools(
           index: number;
           node: JxMutableNode;
         };
-        const parent = getNodeAtPath(tab.doc.document, parentPath);
+        const parent = host.document.getNodeAtPath(parentPath);
         if (parent === undefined) {
           return { success: false, error: `No node exists at path ${JSON.stringify(parentPath)}.` };
         }
@@ -311,9 +271,9 @@ export function registerAiTools(
          * Guard against a parentPath that points at a children *array* rather than a node — the
          * common failure is a trailing "children" segment (e.g. ["children",0,"children"]).
          * add_child appends "children" + index itself, so an array-valued parentPath would splice
-         * into a bogus `.children` property on the array (childArray() creates one) and the node
-         * would be stored where nothing renders, yet the tool would report success. Reject it with
-         * a precise message so the loop self-corrects.
+         * into a bogus `.children` property on the array and the node would be stored where
+         * nothing renders, yet the tool would report success. Reject it with a precise message so
+         * the loop self-corrects.
          */
         if (Array.isArray(parent)) {
           return {
@@ -325,19 +285,18 @@ export function registerAiTools(
               `pass parentPath: ["children",0,"children",1].`,
           };
         }
-        if (parent.children !== undefined && !Array.isArray(parent.children)) {
+        const parentNode = parent as JxMutableNode;
+        if (parentNode.children !== undefined && !Array.isArray(parentNode.children)) {
           return {
             success: false,
             error: "Cannot insert into mapped-array children; edit the map template instead.",
           };
         }
         return applyAndValidate(
-          tab,
-          (t) => mutateInsertNode(t, parentPath, index, childNode),
+          host,
+          () => host.document.insertNode(parentPath, index, childNode),
           `Inserted node at ${JSON.stringify([...parentPath, "children", index])}.`,
           validate,
-          renderCheck,
-          projectStyle,
         );
       },
     }),
@@ -376,8 +335,7 @@ export function registerAiTools(
         required: ["path", "property"],
       },
       async execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        if (!host.document.getDocument()) {
           return { success: false, error: "No document is open." };
         }
         const { path, property, value } = args as {
@@ -385,18 +343,16 @@ export function registerAiTools(
           property: string;
           value?: unknown;
         };
-        if (getNodeAtPath(tab.doc.document, path) === undefined) {
+        if (host.document.getNodeAtPath(path) === undefined) {
           return { success: false, error: `No node exists at path ${JSON.stringify(path)}.` };
         }
         const prop = property;
         const val = value == null ? undefined : String(value);
         return applyAndValidate(
-          tab,
-          (t) => mutateUpdateStyle(t, path, prop, val),
+          host,
+          () => host.document.updateStyle(path, prop, val),
           `Set style "${prop}" at ${JSON.stringify(path)}.`,
           validate,
-          renderCheck,
-          projectStyle,
         );
       },
     }),
@@ -422,25 +378,18 @@ export function registerAiTools(
         required: ["path", "value"],
       },
       async execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        if (!host.document.getDocument()) {
           return { success: false, error: "No document is open." };
         }
         const { path, value } = args as { path: JxPath; value: string };
-        if (getNodeAtPath(tab.doc.document, path) === undefined) {
+        if (host.document.getNodeAtPath(path) === undefined) {
           return { success: false, error: `No node exists at path ${JSON.stringify(path)}.` };
         }
         return applyAndValidate(
-          tab,
-          (t) => {
-            const node = getNodeAtPath(t.doc.document, path);
-            delete node.textContent;
-            node.children = [value];
-          },
+          host,
+          () => host.document.setText(path, value),
           `Set text at ${JSON.stringify(path)}.`,
           validate,
-          renderCheck,
-          projectStyle,
         );
       },
     }),
@@ -468,34 +417,23 @@ export function registerAiTools(
         required: ["key", "value"],
       },
       async execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        const doc = host.document.getDocument();
+        if (!doc) {
           return { success: false, error: "No document is open." };
         }
         const { key, value } = args as { key: string; value: JxStateDefinition };
-        if (tab.doc.document.state && tab.doc.document.state[key] !== undefined) {
+        const docState = (doc as JxMutableNode).state;
+        if (docState && docState[key] !== undefined) {
           return {
             success: false,
             error: `State key "${key}" already exists. Use update_state to change it, or remove it first.`,
           };
         }
         return applyAndValidate(
-          tab,
-          (t) => {
-            // Ensure the state object exists before setting a key on it.
-            if (!t.doc.document.state) {
-              t.doc.document.state = {};
-            }
-            /*
-             * Directly mutate — bypass mutateUpdateProperty because its "" → delete behaviour
-             * (transact.ts:248) is wrong for state defaults (e.g. "title": "").
-             */
-            t.doc.document.state[key] = value;
-          },
+          host,
+          () => host.document.updateState(key, value),
           `Added state "${key}".`,
           validate,
-          renderCheck,
-          projectStyle,
         );
       },
     }),
@@ -524,38 +462,23 @@ export function registerAiTools(
         required: ["key"],
       },
       async execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        const doc = host.document.getDocument();
+        if (!doc) {
           return { success: false, error: "No document is open." };
         }
         const { key, value } = args as { key: string; value?: JxStateDefinition | null };
-        if (!tab.doc.document.state || tab.doc.document.state[key] === undefined) {
+        const docState = (doc as JxMutableNode).state;
+        if (!docState || docState[key] === undefined) {
           return {
             success: false,
-            error: `State key "${key}" does not exist. Use add_state to create it, or check the name. Current state keys: ${Object.keys(tab.doc.document.state || {}).join(", ") || "(none)"}`,
+            error: `State key "${key}" does not exist. Use add_state to create it, or check the name. Current state keys: ${Object.keys(docState || {}).join(", ") || "(none)"}`,
           };
         }
         return applyAndValidate(
-          tab,
-          (t) => {
-            /*
-             * Directly mutate — bypass mutateUpdateProperty because its "" → delete behaviour
-             * (transact.ts:248) is wrong for state defaults (e.g. "title": "").
-             */
-            const { state } = t.doc.document;
-            if (!state) {
-              return;
-            }
-            if (value == null) {
-              delete state[key];
-            } else {
-              state[key] = value;
-            }
-          },
+          host,
+          () => host.document.updateState(key, value == null ? undefined : value),
           value == null ? `Removed state "${key}".` : `Updated state "${key}".`,
           validate,
-          renderCheck,
-          projectStyle,
         );
       },
     }),
@@ -590,8 +513,7 @@ export function registerAiTools(
         required: ["fromPath", "toParentPath", "toIndex"],
       },
       async execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        if (!host.document.getDocument()) {
           return { success: false, error: "No document is open." };
         }
         const { fromPath, toParentPath, toIndex } = args as {
@@ -602,25 +524,23 @@ export function registerAiTools(
         if (fromPath.length < 2) {
           return { success: false, error: "Cannot move the document root." };
         }
-        if (getNodeAtPath(tab.doc.document, fromPath) === undefined) {
+        if (host.document.getNodeAtPath(fromPath) === undefined) {
           return {
             success: false,
             error: `No node exists at fromPath ${JSON.stringify(fromPath)}.`,
           };
         }
-        if (getNodeAtPath(tab.doc.document, toParentPath) === undefined) {
+        if (host.document.getNodeAtPath(toParentPath) === undefined) {
           return {
             success: false,
             error: `No node exists at toParentPath ${JSON.stringify(toParentPath)}.`,
           };
         }
         return applyAndValidate(
-          tab,
-          (t) => mutateMoveNode(t, fromPath, toParentPath, toIndex),
+          host,
+          () => host.document.moveNode(fromPath, toParentPath, toIndex),
           `Moved node from ${JSON.stringify(fromPath)} to ${JSON.stringify([...toParentPath, "children", toIndex])}.`,
           validate,
-          renderCheck,
-          projectStyle,
         );
       },
     }),
@@ -651,7 +571,7 @@ export function registerAiTools(
         required: ["path", "content"],
       },
       async execute(args) {
-        if (!saveFile) {
+        if (!host.files) {
           return {
             success: false,
             error: "File operations are not available in this environment.",
@@ -666,8 +586,8 @@ export function registerAiTools(
             error: `Component content has schema errors. Fix these before creating the file:\n${formatted}`,
           };
         }
-        if (renderCheck) {
-          const renderResult = await renderCheck(content);
+        if (host.renderCheck) {
+          const renderResult = await host.renderCheck(content);
           if (!renderResult.ok) {
             return {
               success: false,
@@ -676,7 +596,7 @@ export function registerAiTools(
           }
         }
         try {
-          await saveFile(relPath, JSON.stringify(content, null, 2));
+          await host.files.saveFile(relPath, JSON.stringify(content, null, 2));
           return { success: true, summary: `Created component at "${relPath}".` };
         } catch (error) {
           return {
@@ -712,7 +632,7 @@ export function registerAiTools(
         required: ["path", "content"],
       },
       async execute(args) {
-        if (!saveFile) {
+        if (!host.files) {
           return {
             success: false,
             error: "File operations are not available in this environment.",
@@ -727,8 +647,8 @@ export function registerAiTools(
             error: `Page content has schema errors. Fix these before creating the file:\n${formatted}`,
           };
         }
-        if (renderCheck) {
-          const renderResult = await renderCheck(content);
+        if (host.renderCheck) {
+          const renderResult = await host.renderCheck(content);
           if (!renderResult.ok) {
             return {
               success: false,
@@ -737,7 +657,7 @@ export function registerAiTools(
           }
         }
         try {
-          await saveFile(relPath, JSON.stringify(content, null, 2));
+          await host.files.saveFile(relPath, JSON.stringify(content, null, 2));
           return { success: true, summary: `Created page at "${relPath}".` };
         } catch (error) {
           return {
@@ -772,7 +692,7 @@ export function registerAiTools(
         required: ["path"],
       },
       async execute(args) {
-        if (!openDocument) {
+        if (!host.files) {
           return {
             success: false,
             error: "File navigation is not available in this environment.",
@@ -780,24 +700,23 @@ export function registerAiTools(
         }
         const { path: relPath } = args as { path: string };
         try {
-          await openDocument(relPath);
-          const tab = getTab();
-          if (!tab) {
+          await host.files.openDocument(relPath);
+          if (!host.document.getDocument()) {
             return {
               success: false,
               error: `File "${relPath}" could not be opened — no active tab after navigation.`,
             };
           }
           /*
-           * The agent loop opens a single undo batch on the tab that was active at loop start
-           * (tool-executor.js → beginBatch). Switching the active document mid-loop would strand
-           * the new tab's edits with no history snapshot — undo would have nothing to roll back.
-           * Flush the previous tab's batch and re-open one on the newly-active tab so edits in
-           * each document remain individually undoable.
+           * The agent loop opens a single undo batch on the document active at loop start
+           * (agent-loop.js → host.document.beginBatch()). Switching the active document mid-loop
+           * would strand the new document's edits with no history snapshot — undo would have
+           * nothing to roll back. Flush the previous document's batch and re-open one on the
+           * newly-active document so edits in each document remain individually undoable.
            */
-          if (isBatching()) {
-            endBatch();
-            beginBatch(tab);
+          if (host.document.isBatching()) {
+            host.document.endBatch();
+            host.document.beginBatch();
           }
           return {
             success: true,
@@ -829,24 +748,21 @@ export function registerAiTools(
         required: ["path"],
       },
       async execute(args) {
-        const tab = getTab();
-        if (!tab) {
+        if (!host.document.getDocument()) {
           return { success: false, error: "No document is open." };
         }
         const { path } = args as { path: JxPath };
         if (path.length < 2) {
           return { success: false, error: "Cannot remove the document root." };
         }
-        if (getNodeAtPath(tab.doc.document, path) === undefined) {
+        if (host.document.getNodeAtPath(path) === undefined) {
           return { success: false, error: `No node exists at path ${JSON.stringify(path)}.` };
         }
         return applyAndValidate(
-          tab,
-          (t) => mutateRemoveNode(t, path),
+          host,
+          () => host.document.removeNode(path),
           `Removed node at ${JSON.stringify(path)}.`,
           validate,
-          renderCheck,
-          projectStyle,
         );
       },
     }),

@@ -90,4 +90,67 @@ describe("eval runner", () => {
     expect(result.passAtK).toBe(true);
     expect(result.passHatK).toBe(true);
   });
+
+  // MAX_ROUNDS (agent-loop.ts) caps a turn at 5 streamChat rounds, so each trial below fits its
+  // Tool calls plus one trailing "stop" round within that budget.
+  test("host.document exercises move_node, remove_node, set_style, and set_text", async () => {
+    const client = fakeClient([
+      toolCallRound("c1", "move_node", {
+        fromPath: ["children", 0, "children", 0],
+        toParentPath: ["children", 1],
+        toIndex: 0,
+      }),
+      // Now that the <p> has moved out of <section>, remove the now-empty <section>.
+      toolCallRound("c2", "remove_node", { path: ["children", 0] }),
+      toolCallRound("c3", "set_style", { path: [], property: "color", value: "red" }),
+      // Set_text last so its overwrite of root.children is what the final doc shows.
+      toolCallRound("c4", "set_text", { path: [], value: "root text" }),
+      [{ type: "done", stopReason: "stop" }],
+    ]);
+
+    const task = {
+      id: "unit-move-remove-style-text",
+      prompt: "exercise move/remove/style/text mutators",
+      tags: ["unit"],
+      initialDoc: {
+        tagName: "div",
+        children: [
+          { tagName: "section", children: [{ tagName: "p", textContent: "move me" }] },
+          { tagName: "aside", children: [] },
+        ],
+      },
+    };
+
+    const trial = await runTrial(task, { client });
+
+    expect(trial.loopError).toBeNull();
+    const root = trial.finalDoc as JxMutableNode;
+    expect(root.style?.color).toBe("red");
+    // Set_text on the root replaced its children with the text value — the earlier structural
+    // Edits (move/remove) happened first, but set_text's own overwrite is what the final doc shows.
+    expect((root.children as string[])[0]).toBe("root text");
+  });
+
+  test("host.document exercises set_property and add/remove state", async () => {
+    const client = fakeClient([
+      toolCallRound("c1", "set_property", { path: [], key: "id", value: "root-id" }),
+      toolCallRound("c2", "add_state", { key: "count", value: 0 }),
+      toolCallRound("c3", "update_state", { key: "count", value: null }),
+      [{ type: "done", stopReason: "stop" }],
+    ]);
+
+    const task = {
+      id: "unit-property-state",
+      prompt: "exercise property and state mutators",
+      tags: ["unit"],
+      initialDoc: { tagName: "div", children: [] },
+    };
+
+    const trial = await runTrial(task, { client });
+
+    expect(trial.loopError).toBeNull();
+    const root = trial.finalDoc as JxMutableNode;
+    expect(root.id).toBe("root-id");
+    expect(root.state).not.toHaveProperty("count");
+  });
 });

@@ -19,6 +19,8 @@ const ALLOWLIST = new Set([
   "src/rpc-schema.ts",
   // Collab provider contract: interfaces/type aliases only, no runtime exports.
   "src/provider.ts",
+  // AssistantHost seam: interfaces/type aliases only, no runtime exports.
+  "src/host.ts",
 ]);
 
 const pkgArg = process.argv.at(2);

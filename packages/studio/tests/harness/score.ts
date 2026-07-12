@@ -11,7 +11,7 @@
 
 import { undo, redo } from "../../src/tabs/transact";
 import { toRaw } from "../../src/reactivity";
-import { validateDoc } from "../../src/services/jx-validate";
+import { validateDoc } from "@jxsuite/assistant/validate";
 import type { Tab } from "../../src/tabs/tab";
 import type { buildRealHarness } from "./real-llm";
 

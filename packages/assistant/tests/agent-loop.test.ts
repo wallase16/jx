@@ -1,13 +1,11 @@
-import "./with-dom.ts";
 import { describe, expect, test } from "bun:test";
 import { createChatState, createToolRegistry } from "@jxsuite/ai";
 import type { ToolRegistry } from "@jxsuite/ai/tools";
 import type { StreamingClient } from "@jxsuite/ai/streaming-client";
 import type { JxMutableNode } from "@jxsuite/schema/types";
-import { createTab, disposeTab } from "../src/tabs/tab";
-import type { Tab } from "../src/tabs/tab";
-import { registerAiTools } from "../src/services/ai-tools";
-import { runAgentLoop } from "../src/services/tool-executor";
+import { registerAiTools } from "../src/tools";
+import { runAgentLoop } from "../src/agent-loop";
+import { createFakeHost } from "./fake-host";
 
 /** The normalized stream event the StreamingClient emits (not exported, so derived here). */
 type StreamEvent =
@@ -16,8 +14,6 @@ type StreamEvent =
 /**
  * A scripted streaming client: each entry in `rounds` is the sequence of StreamEvents to yield on
  * the corresponding streamChat() call. Lets us drive runAgentLoop without a real LLM.
- *
- * @param {object[][]} rounds
  */
 function fakeClient(rounds: StreamEvent[][]): StreamingClient & { calls: () => number } {
   let call = 0;
@@ -43,49 +39,59 @@ function toolCallRound(id: string, name: string, args: object): StreamEvent[] {
   ];
 }
 
-function makeTab(doc?: Record<string, unknown>) {
-  const document = doc ?? { tagName: "div", children: [{ tagName: "p", textContent: "Hello" }] };
-  return createTab({ document, id: "test" });
-}
+const DEFAULT_DOC = { tagName: "div", children: [{ tagName: "p", textContent: "Hello" }] };
 
-function harness(tab: Tab, validate?: (doc: unknown) => Promise<string[]>) {
+function harness(
+  doc: Record<string, unknown> = DEFAULT_DOC,
+  validate?: (doc: unknown) => Promise<string[]>,
+) {
+  const { host, getDoc, batch } = createFakeHost(doc, { validate: validate ?? (async () => []) });
   const chatState = createChatState({ model: "test" });
   const toolRegistry = createToolRegistry();
-  registerAiTools(toolRegistry, { getTab: () => tab, ...(validate ? { validate } : {}) });
-  return { chatState, toolRegistry: toolRegistry as ToolRegistry };
+  registerAiTools(toolRegistry, host);
+  return { chatState, toolRegistry: toolRegistry as ToolRegistry, host, getDoc, batch };
 }
 
-describe("ai agent loop — integration", () => {
-  test("executes a tool call and mutates the live document", async () => {
-    const tab = makeTab();
-    const { chatState, toolRegistry } = harness(tab, async () => []);
+describe("agent loop — integration", () => {
+  test("executes a tool call and mutates the live document, batching the whole turn", async () => {
+    const { chatState, toolRegistry, host, getDoc, batch } = harness();
     const client = fakeClient([
-      toolCallRound("c1", "add_child", {
-        parentPath: [],
-        index: 1,
-        node: { tagName: "span", textContent: "added" },
-      }),
+      [
+        { type: "delta", content: "Adding a span..." },
+        ...toolCallRound("c1", "add_child", {
+          parentPath: [],
+          index: 1,
+          node: { tagName: "span", textContent: "added" },
+        }),
+      ],
       [{ type: "done", stopReason: "stop" }],
     ]);
 
     chatState.sendMessage("add a span");
-    await runAgentLoop({ chatState, streamingClient: client, toolRegistry, systemPrompt: "" });
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
 
-    const children = tab.doc.document.children as (JxMutableNode | string)[];
+    const children = getDoc().children as (JxMutableNode | string)[];
     expect(children).toHaveLength(2);
     expect((children[1] as JxMutableNode).tagName).toBe("span");
-    expect(tab.history.index).toBe(1); // One undoable transaction
     expect(chatState.status).toBe("idle");
-    disposeTab(tab);
+    // The whole turn is one batch: exactly one begin, one end.
+    expect(batch.begins).toBe(1);
+    expect(batch.ends).toBe(1);
+    expect(host.document.isBatching()).toBe(false);
   });
 
   test("feeds schema errors back so the model can self-correct", async () => {
-    const tab = makeTab();
     // Inject a validator that flags the document while the root tagName is "header" (no hyphen),
     // And is happy once it becomes "site-header" — simulating the schema eval signal.
     const validate = async (doc: unknown) =>
       (doc as JxMutableNode).tagName === "header" ? ["(root): invalid custom element tagName"] : [];
-    const { chatState, toolRegistry } = harness(tab, validate);
+    const { chatState, toolRegistry, host, getDoc } = harness(undefined, validate);
 
     const client = fakeClient([
       // Round 1: introduce the bad tagName.
@@ -97,9 +103,15 @@ describe("ai agent loop — integration", () => {
     ]);
 
     chatState.sendMessage("rename root to header");
-    await runAgentLoop({ chatState, streamingClient: client, toolRegistry, systemPrompt: "" });
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
 
-    expect(tab.doc.document.tagName).toBe("site-header");
+    expect(getDoc().tagName).toBe("site-header");
     // The first tool result must have surfaced the schema error to the model.
     const toolMsgs = chatState.messages.filter((m) => m.role === "tool");
     expect(toolMsgs[0]!.content).toContain("schema errors");
@@ -107,12 +119,10 @@ describe("ai agent loop — integration", () => {
     // The corrected round reported success (no schema errors).
     expect(toolMsgs[1]!.content).toContain('"success":true');
     expect(chatState.status).toBe("idle");
-    disposeTab(tab);
   });
 
   test("gives up with an error after the round cap when tools never stop", async () => {
-    const tab = makeTab();
-    const { chatState, toolRegistry } = harness(tab, async () => []);
+    const { chatState, toolRegistry, host } = harness();
     // Every round emits another tool call — the model never stops.
     const client = fakeClient(
       Array.from({ length: 10 }, (_, i) =>
@@ -121,31 +131,41 @@ describe("ai agent loop — integration", () => {
     );
 
     chatState.sendMessage("loop forever");
-    await runAgentLoop({ chatState, streamingClient: client, toolRegistry, systemPrompt: "" });
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
 
     expect(client.calls()).toBe(5); // MAX_ROUNDS
     expect(chatState.status).toBe("error");
     expect(chatState.error).toContain("ran out of tool-call rounds");
-    disposeTab(tab);
   });
 
   test("surfaces an upstream stream error and stops", async () => {
-    const tab = makeTab();
-    const { chatState, toolRegistry } = harness(tab, async () => []);
+    const { chatState, toolRegistry, host } = harness();
     const client = fakeClient([[{ type: "error", message: "upstream 500" }]]);
 
     chatState.sendMessage("hi");
-    await runAgentLoop({ chatState, streamingClient: client, toolRegistry, systemPrompt: "" });
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
 
     expect(chatState.status).toBe("error");
     expect(chatState.error).toBe("upstream 500");
     expect(client.calls()).toBe(1); // Bailed after the first round
-    disposeTab(tab);
+    // The batch still closes even on an early error return.
+    expect(host.document.isBatching()).toBe(false);
   });
 
   test("summarizes accumulated tool errors (and ignores unknown events) at the round cap", async () => {
-    const tab = makeTab();
-    const { chatState, toolRegistry } = harness(tab, async () => []);
+    const { chatState, toolRegistry, host } = harness();
     // Every round emits an unrecognized event (default switch case) followed by a tool call that
     // Always fails (removing the document root), so errors accumulate until the round cap is hit.
     const client = fakeClient(
@@ -159,18 +179,22 @@ describe("ai agent loop — integration", () => {
     );
 
     chatState.sendMessage("delete everything repeatedly");
-    await runAgentLoop({ chatState, streamingClient: client, toolRegistry, systemPrompt: "" });
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
 
     expect(chatState.status).toBe("error");
     expect(chatState.error).toContain("ran out of tool-call rounds");
     expect(chatState.error).toContain("Errors encountered");
     expect(chatState.error).toContain("Cannot remove the document root");
-    disposeTab(tab);
   });
 
   test("reports a tool call whose arguments are malformed JSON", async () => {
-    const tab = makeTab();
-    const { chatState, toolRegistry } = harness(tab, async () => []);
+    const { chatState, toolRegistry, host } = harness();
     // Hand-craft a tool call whose accumulated arguments are not valid JSON.
     const client = fakeClient([
       [
@@ -183,11 +207,16 @@ describe("ai agent loop — integration", () => {
     ]);
 
     chatState.sendMessage("break it");
-    await runAgentLoop({ chatState, streamingClient: client, toolRegistry, systemPrompt: "" });
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
 
     const toolMsg = chatState.messages.find((m) => m.role === "tool");
     expect(toolMsg!.content).toContain("Failed to parse arguments");
     expect(chatState.status).toBe("idle");
-    disposeTab(tab);
   });
 });

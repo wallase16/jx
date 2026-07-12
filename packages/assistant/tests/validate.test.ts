@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { validateDoc } from "../src/services/jx-validate";
+import { validateDoc } from "../src/validate";
 
-describe("jx-validate (real @jxsuite/schema)", () => {
+describe("validate (real @jxsuite/schema)", () => {
   // Schema compilation loads @webref/* packages and compiles ajv — give it plenty of time.
   test("valid document yields no errors", async () => {
     const errs = await validateDoc({

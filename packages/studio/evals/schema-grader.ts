@@ -8,7 +8,7 @@
  * @license MIT
  */
 
-import { validateDoc } from "../src/services/jx-validate";
+import { validateDoc } from "@jxsuite/assistant/validate";
 
 /**
  * @param {unknown} doc

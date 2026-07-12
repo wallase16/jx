@@ -1,9 +1,9 @@
 /**
- * Tool-executor.js — Agentic loop driver for the document AI assistant
+ * Agent-loop.js — Agentic loop driver for the document AI assistant
  *
- * Streams a chat round, executes any tool calls the model makes (via a ToolRegistry backed by
- * `transactDoc()`), feeds the results back as `tool` messages, and re-streams — up to a capped
- * number of rounds (spec §10.2, ADR docs/ai-assistant-decision.md §6a).
+ * Streams a chat round, executes any tool calls the model makes (via a ToolRegistry backed by the
+ * injected `AssistantHost`), feeds the results back as `tool` messages, and re-streams — up to a
+ * capped number of rounds (spec §10.2, ADR docs/ai-assistant-decision.md §6a).
  *
  * @license MIT
  */
@@ -12,8 +12,7 @@ import type { createChatState } from "@jxsuite/ai/chat-state";
 import type { StreamingClient } from "@jxsuite/ai/streaming-client";
 import type { ToolRegistry } from "@jxsuite/ai/tools";
 
-import type { Tab } from "../tabs/tab";
-import { beginBatch, endBatch } from "../tabs/transact";
+import type { AssistantHost } from "./host";
 
 const MAX_ROUNDS = 5;
 
@@ -23,12 +22,15 @@ interface RunAgentLoopOptions {
   toolRegistry: ToolRegistry;
   systemPrompt: string;
   signal?: AbortSignal;
-  getTab?: () => Tab | null;
+  host: AssistantHost;
 }
 
 /**
  * Run one user turn through the agent loop: stream the model's response, execute any tool calls,
  * and repeat until the model stops calling tools or the round cap is hit.
+ *
+ * `document` is a required `AssistantHost` capability, so the whole turn is unconditionally batched
+ * into one undo step via `host.document.beginBatch()`/`endBatch()`.
  */
 export async function runAgentLoop({
   chatState,
@@ -36,15 +38,13 @@ export async function runAgentLoop({
   toolRegistry,
   systemPrompt,
   signal,
-  getTab,
+  host,
 }: RunAgentLoopOptions): Promise<void> {
   const allErrors: string[] = [];
   const appliedSummaries: string[] = [];
 
   // Batch all tool-call mutations into a single undo step
-  if (getTab) {
-    beginBatch(getTab());
-  }
+  host.document.beginBatch();
 
   try {
     for (let round = 1; round <= MAX_ROUNDS; round++) {
@@ -151,6 +151,6 @@ export async function runAgentLoop({
       `I ran out of tool-call rounds (${MAX_ROUNDS}) before finishing.${applied}${errors}\n\nYou can continue by sending another message, or try a more specific request.`,
     );
   } finally {
-    endBatch();
+    host.document.endBatch();
   }
 }

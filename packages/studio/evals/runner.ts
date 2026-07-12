@@ -2,9 +2,10 @@
  * Runner.js — headless driver for the AI-assistant eval harness.
  *
  * Exercises the *production* agent loop (the real `runAgentLoop` + `@jxsuite/ai` tool registry +
- * `ai-system-prompt` + `ai-tools`) against a fixed task, swapping only the fake test client for a
- * real OpenAI-compatible streaming client. Each trial gets a fresh tab (clean state — no shared
- * caches, per Anthropic's isolation guidance), then the produced document is graded.
+ * `@jxsuite/assistant`'s `buildSystemPrompt`/`registerAiTools`) against a fixed task, swapping only
+ * the fake test client for a real OpenAI-compatible streaming client. Each trial gets a fresh tab
+ * (clean state — no shared caches, per Anthropic's isolation guidance), then the produced document
+ * is graded.
  *
  * @license MIT
  */
@@ -13,13 +14,68 @@ import { createChatState, createToolRegistry } from "@jxsuite/ai";
 import { createOpenAIStreamingClient } from "@jxsuite/ai/streaming-client";
 import type { StreamingClient } from "@jxsuite/ai/streaming-client";
 import type { ToolRegistry } from "@jxsuite/ai/tools";
+import { registerAiTools, runAgentLoop, buildSystemPrompt } from "@jxsuite/assistant";
+import type { AssistantHost } from "@jxsuite/assistant/host";
 import type { JxMutableNode } from "@jxsuite/schema/types";
 import { createTab, disposeTab } from "../src/tabs/tab";
-import { registerAiTools } from "../src/services/ai-tools";
-import { runAgentLoop } from "../src/services/tool-executor";
-import { buildSystemPrompt } from "../src/services/ai-system-prompt";
+import type { Tab } from "../src/tabs/tab";
+import { toRaw } from "../src/reactivity";
+import { getNodeAtPath } from "../src/state";
+import {
+  beginBatch,
+  endBatch,
+  isBatching,
+  mutateInsertNode,
+  mutateMoveNode,
+  mutateRemoveNode,
+  mutateUpdateProperty,
+  mutateUpdateStyle,
+  transactDoc,
+} from "../src/tabs/transact";
+import type { JxNodeValue } from "../src/tabs/transact";
 import { renderCritic } from "./render-critic.js";
 import { schemaGrader } from "./schema-grader.js";
+
+/** Build a minimal `AssistantHost` around one eval trial's tab — no files/renderCheck capability. */
+function buildEvalHost(tab: Tab): AssistantHost {
+  return {
+    document: {
+      beginBatch: () => beginBatch(tab),
+      endBatch: () => endBatch(),
+      getDocument: () => toRaw(tab.doc.document) as JxMutableNode,
+      getNodeAtPath: (path) => getNodeAtPath(tab.doc.document, path),
+      insertNode: (parentPath, index, node) =>
+        transactDoc(tab, (t) => mutateInsertNode(t, parentPath, index, node)),
+      isBatching: () => isBatching(),
+      moveNode: (fromPath, toParentPath, toIndex) =>
+        transactDoc(tab, (t) => mutateMoveNode(t, fromPath, toParentPath, toIndex)),
+      removeNode: (path) => transactDoc(tab, (t) => mutateRemoveNode(t, path)),
+      setText: (path, value) =>
+        transactDoc(tab, (t) => {
+          const node = getNodeAtPath(t.doc.document, path);
+          delete node.textContent;
+          node.children = [value];
+        }),
+      updateProperty: (path, key, value) =>
+        transactDoc(tab, (t) => mutateUpdateProperty(t, path, key, value as JxNodeValue)),
+      updateState: (key, value) =>
+        transactDoc(tab, (t) => {
+          if (value === undefined) {
+            if (t.doc.document.state) {
+              delete t.doc.document.state[key];
+            }
+            return;
+          }
+          if (!t.doc.document.state) {
+            t.doc.document.state = {};
+          }
+          t.doc.document.state[key] = value;
+        }),
+      updateStyle: (path, property, value) =>
+        transactDoc(tab, (t) => mutateUpdateStyle(t, path, property, value)),
+    },
+  };
+}
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
@@ -75,8 +131,9 @@ export async function runTrial(
   try {
     const chatState = createChatState({ model: cfg.model });
     const toolRegistry = createToolRegistry() as ToolRegistry;
+    const host = buildEvalHost(tab);
     // Default `validate` is the real validateDoc, so the loop self-corrects just like production.
-    registerAiTools(toolRegistry, { getTab: () => tab });
+    registerAiTools(toolRegistry, host);
 
     const streamingClient =
       client ??
@@ -85,9 +142,10 @@ export async function runTrial(
     chatState.sendMessage(task.prompt);
     await runAgentLoop({
       chatState,
+      host,
       streamingClient,
-      toolRegistry,
       systemPrompt: buildSystemPrompt({ document: structuredClone(task.initialDoc) }),
+      toolRegistry,
     });
 
     // JSON-clone to strip the Vue reactive proxy and any functions — graders only need the plain

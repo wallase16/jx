@@ -5,6 +5,7 @@ coveragePathIgnorePatterns = [
   "**/tests/**",
   "./result/**",
   "../ai/**",
+  "../assistant/**",
   "../collab/**",
   "../compiler/**",
   "../create/**",

@@ -21,7 +21,7 @@ import { loadFixture } from "./load-fixture.js";
 import { buildRealHarness, runPrompt } from "./real-llm.js";
 import { scoreRun } from "./score.js";
 import { textOf, anyStyle, anyNode } from "./doc-query.js";
-import { validateDoc } from "../../src/services/jx-validate";
+import { validateDoc } from "@jxsuite/assistant/validate";
 
 /** Context handed to a test's `check`: the model's file writes plus a reader for them. */
 interface EvalCtx {

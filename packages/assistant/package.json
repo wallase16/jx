@@ -1,0 +1,40 @@
+{
+  "name": "@jxsuite/assistant",
+  "version": "0.1.0",
+  "description": "Jx AI assistant core — document tools, agent loop, system prompt, and the AssistantHost capability seam",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jxsuite/jx.git",
+    "directory": "packages/assistant"
+  },
+  "files": [
+    "src/",
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./host": "./src/host.ts",
+    "./tools": "./src/tools.ts",
+    "./system-prompt": "./src/system-prompt.ts",
+    "./agent-loop": "./src/agent-loop.ts",
+    "./context-manager": "./src/context-manager.ts",
+    "./validate": "./src/validate.ts",
+    "./token-lint": "./src/token-lint.ts"
+  },
+  "publishConfig": {
+    "provenance": true
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir dist --target browser --sourcemap=linked",
+    "test": "bun test",
+    "upgrade": "bunx npm-check-updates -u && bun install"
+  },
+  "dependencies": {
+    "@jxsuite/ai": "workspace:^",
+    "@jxsuite/schema": "workspace:^",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1"
+  }
+}

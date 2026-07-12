@@ -46,9 +46,10 @@ const DATA_FILES = [
   "src/ui/jx-theme.ts",
   /* <input type="color"> needs a real hex default; same category as color-selector.ts. */
   "src/new-project/design-fields.ts",
-  /* Example project.json style block shown to the LLM as prompt content, not actual
-     chrome CSS — the hexes are illustrative data, like a colour picker's default. */
-  "src/services/ai-system-prompt.ts",
+  /* Note: the example project.json style block shown to the LLM as prompt content (illustrative
+     data, like a colour picker's default) used to need an entry here too, but that file
+     (ai-system-prompt.ts) moved to packages/assistant/src/system-prompt.ts in the Phase 2 seam
+     extraction — this glob only scans packages/studio/src/**, so it no longer needs listing. */
 ];
 
 /** Px values that have an exact Spectrum token and should be tokenized in new code. */

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createChatState } from "@jxsuite/ai";
 import type { Message } from "@jxsuite/ai/chat-state";
-import { trimContext } from "../src/services/context-manager";
+import { trimContext } from "../src/context-manager";
 
 function longContent(tokens: number) {
   return "x".repeat(tokens * 4);

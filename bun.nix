@@ -746,6 +746,7 @@
     hash = "sha512-q7qL4Mgjs1vByCaTnDFcBnV9HS7GVPJX5vyVoCgZHNSC9rjwIlmbXG5sUuorR5ndfHAIlJ8pVStxvjXHbNvtUg==";
   };
   "@jxsuite/ai" = copyPathToStore ./packages/ai;
+  "@jxsuite/assistant" = copyPathToStore ./packages/assistant;
   "@jxsuite/collab" = copyPathToStore ./packages/collab;
   "@jxsuite/compiler" = copyPathToStore ./packages/compiler;
   "@jxsuite/create" = copyPathToStore ./packages/create;

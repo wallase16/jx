@@ -1,24 +1,24 @@
 /**
- * Tests for src/services/ai-system-prompt.ts — the dynamic system prompt builder.
+ * Tests for src/system-prompt.ts — the dynamic system prompt builder.
  *
  * BuildSystemPrompt() assembles a large prompt from static reference sections plus optional context
- * (open document, project config, components). These tests drive every optional section so the
- * document summary (element tree, typed state, imported elements) and project summary (tokens,
- * components, breakpoints) branches are all exercised.
+ * (open document, project config, components, environment capabilities). These tests drive every
+ * optional section so the document summary (element tree, typed state, imported elements), project
+ * summary (tokens, components, breakpoints), and capabilities section branches are all exercised.
  */
-import "./with-dom.ts";
 import { describe, expect, test } from "bun:test";
-import { buildSystemPrompt } from "../src/services/ai-system-prompt";
-import type { ComponentEntry } from "../src/files/components";
+import { buildSystemPrompt } from "../src/system-prompt";
+import type { ComponentEntry } from "../src/host";
 import type { JxMutableNode, ProjectConfig } from "@jxsuite/schema/types";
 
-describe("ai-system-prompt — buildSystemPrompt", () => {
+describe("system-prompt — buildSystemPrompt", () => {
   test("emits the static core sections with no context", () => {
     const prompt = buildSystemPrompt();
     expect(prompt).toContain("expert Jx builder assistant");
     expect(prompt).toContain("## Error Recovery");
     expect(prompt).not.toContain("## Current Document");
     expect(prompt).not.toContain("## Project Context");
+    expect(prompt).not.toContain("## Environment Capabilities");
   });
 
   test("summarizes the open document: element tree, typed state, and imported elements", () => {
@@ -67,6 +67,53 @@ describe("ai-system-prompt — buildSystemPrompt", () => {
     expect(prompt).not.toContain("Imported elements");
   });
 
+  test("flattens $map templates, atomic custom-component instances, legacy whole-children repeaters, and $switch cases", () => {
+    const document = {
+      children: [
+        // Array-member $map repeater (canonical form).
+        {
+          tagName: "ul",
+          children: [
+            {
+              $prototype: "Array",
+              items: { $ref: "#/state/items" },
+              map: { tagName: "li", textContent: "${$map.item}" },
+            },
+          ],
+        },
+        // Legacy whole-children repeater: the array occupies the children slot itself.
+        {
+          tagName: "ol",
+          children: {
+            $prototype: "Array",
+            items: { $ref: "#/state/legacyItems" },
+            map: { tagName: "li", textContent: "${$map.item}" },
+          },
+        },
+        // Atomic custom-component instance (no user-authored children array).
+        { $props: { label: "Hi" }, tagName: "my-widget" },
+        // $switch with both a case-ref and an inline case (which itself has children).
+        {
+          $switch: { $ref: "#/state/route" },
+          cases: {
+            about: { $ref: "../components/about.json" },
+            home: {
+              children: [{ tagName: "span", textContent: "welcome" }],
+              tagName: "section",
+            },
+          },
+          tagName: "div",
+        },
+      ],
+      state: { items: [], legacyItems: [], route: "home" },
+      tagName: "div",
+    } as unknown as JxMutableNode;
+
+    const prompt = buildSystemPrompt({ document });
+    expect(prompt).toContain("## Current Document");
+    expect(prompt).toContain("Element tree");
+  });
+
   test("summarizes project context: name, root, components, tokens, and breakpoints", () => {
     const projectConfig = {
       $media: { lg: "min-width: 1200px", sm: "max-width: 600px" },
@@ -110,5 +157,19 @@ describe("ai-system-prompt — buildSystemPrompt", () => {
   test("a context-less but truthy project config yields no Project Context section", () => {
     const prompt = buildSystemPrompt({ projectConfig: {} as unknown as ProjectConfig });
     expect(prompt).not.toContain("## Project Context");
+  });
+
+  test("environment capabilities section lists which optional host capabilities are present", () => {
+    const prompt = buildSystemPrompt({ capabilities: { files: true, renderCheck: false } });
+    expect(prompt).toContain("## Environment Capabilities");
+    expect(prompt).toContain("File operations");
+    expect(prompt).toContain("available");
+    expect(prompt).toContain("Render checking");
+    expect(prompt).toContain("not available");
+  });
+
+  test("environment capabilities section is omitted when capabilities is not passed", () => {
+    const prompt = buildSystemPrompt({ document: { tagName: "div" } as JxMutableNode });
+    expect(prompt).not.toContain("## Environment Capabilities");
   });
 });

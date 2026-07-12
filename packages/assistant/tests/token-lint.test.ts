@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { flagHardcodedTokens, formatTokenHints } from "../src/services/token-lint";
+import { flagHardcodedTokens, formatTokenHints } from "../src/token-lint";
 
 const PROJECT_STYLE = {
   "--color-accent": "#3b82f6",
@@ -88,6 +88,11 @@ describe("flagHardcodedTokens", () => {
   it("returns empty for null/undefined inputs", () => {
     expect(flagHardcodedTokens(null, PROJECT_STYLE)).toEqual([]);
     expect(flagHardcodedTokens({}, null)).toEqual([]);
+  });
+
+  it("returns empty when the project style has no -- token entries", () => {
+    const doc = { tagName: "div", style: { color: "#3b82f6" } };
+    expect(flagHardcodedTokens(doc, { fontFamily: "system-ui" })).toEqual([]);
   });
 });
 

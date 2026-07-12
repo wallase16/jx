@@ -1,16 +1,130 @@
 /**
- * Ai-system-prompt.js — Dynamic system prompt builder for the Jx AI assistant
+ * System-prompt.js — Dynamic system prompt builder for the Jx AI assistant
  *
  * Constructs the system prompt based on the current project context, open document,
  * and available components. The quality of AI output depends critically on this file.
  *
+ * Absorbs `VOID_ELEMENTS` (from studio's `store.ts`) and `flattenTree` (from studio's `state.ts`)
+ * as independent copies so this package has no `store.js`/`state.js` import — see
+ * specs/ai-assistant.md §11.2. Studio keeps its own copies since other studio code depends on them;
+ * the small duplication is the deliberate seam cost.
+ *
  * @license MIT
  */
 
-import { VOID_ELEMENTS } from "../store.js";
-import { flattenTree } from "../state.js";
-import type { ComponentEntry } from "../files/components.js";
 import type { JxMutableNode, ProjectConfig } from "@jxsuite/schema/types";
+import type { ComponentEntry } from "./host";
+
+// ─── Absorbed from studio's store.ts (VOID_ELEMENTS) ────────────────────────
+
+/** Void elements that cannot accept children. */
+const VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+// ─── Absorbed from studio's state.ts (flattenTree) ──────────────────────────
+
+type JxPath = (string | number)[];
+
+interface FlatRow {
+  node: JxMutableNode | string | number | boolean;
+  path: JxPath;
+  depth: number;
+  nodeType: string;
+}
+
+/**
+ * Flatten a Jx document into an array of { node, path, depth, nodeType } rows. Walks static
+ * children arrays, $map templates, and $switch cases.
+ *
+ * NodeType: 'element' (default) | 'map' | 'case' | 'case-ref'
+ */
+function flattenTree(
+  doc: JxMutableNode | string | number | boolean,
+  path: JxPath = [],
+  depth = 0,
+): FlatRow[] {
+  // Text node children: bare primitives get a "text" row
+  if (typeof doc === "string" || typeof doc === "number" || typeof doc === "boolean") {
+    return [{ depth, node: doc, nodeType: "text", path }];
+  }
+
+  // Array pseudo-element (repeater): a first-class node at its own path. Emit the "map" row, then
+  // Recurse into its single template at `[...path, "map"]`. This is reached both when the array is
+  // A member of a children array (path `[…, "children", i]`) and the legacy whole-children form
+  // (path `[…, "children"]`).
+  if ((doc as JxMutableNode).$prototype === "Array") {
+    const rows: FlatRow[] = [{ depth, node: doc, nodeType: "map", path }];
+    const mapDef = (doc as JxMutableNode).map;
+    if (mapDef && typeof mapDef === "object") {
+      rows.push(...flattenTree(mapDef as JxMutableNode, [...path, "map"], depth + 1));
+    }
+    return rows;
+  }
+
+  const rows: FlatRow[] = [{ depth, node: doc, nodeType: "element", path }];
+
+  // Custom component instances without user-authored children are atomic in the layer tree
+  if (doc.$props && (doc.tagName || "").includes("-") && !Array.isArray(doc.children)) {
+    return rows;
+  }
+
+  const { children } = doc;
+
+  if (Array.isArray(children)) {
+    for (let i = 0; i < children.length; i++) {
+      const childPath = [...path, "children", i];
+      rows.push(...flattenTree(children[i]!, childPath, depth + 1));
+    }
+  } else if (
+    children &&
+    typeof children === "object" &&
+    (children as JxMutableNode).$prototype === "Array"
+  ) {
+    // Legacy whole-children repeater: the array occupies the children slot itself.
+    rows.push(...flattenTree(children as JxMutableNode, [...path, "children"], depth + 1));
+  }
+
+  // $switch — emit each case as a virtual child
+  if (doc.$switch && doc.cases && typeof doc.cases === "object") {
+    for (const [caseName, caseDef] of Object.entries(doc.cases)) {
+      const casePath = [...path, "cases", caseName];
+      if (caseDef && typeof caseDef === "object" && (caseDef as JxMutableNode).$ref) {
+        rows.push({
+          depth: depth + 1,
+          node: caseDef as JxMutableNode,
+          nodeType: "case-ref",
+          path: casePath,
+        });
+      } else if (caseDef && typeof caseDef === "object") {
+        rows.push({
+          depth: depth + 1,
+          node: caseDef as JxMutableNode,
+          nodeType: "case",
+          path: casePath,
+        });
+        // Recurse into case children (skip the case node itself — already emitted)
+        const caseChildren = flattenTree(caseDef as JxMutableNode, casePath, depth + 2);
+        rows.push(...caseChildren.slice(1));
+      }
+    }
+  }
+
+  return rows;
+}
 
 /** Options for {@link buildSystemPrompt}. */
 interface BuildSystemPromptOptions {
@@ -22,6 +136,12 @@ interface BuildSystemPromptOptions {
   components?: ComponentEntry[] | undefined;
   /** Project root path. */
   projectRoot?: string | undefined;
+  /**
+   * Which optional `AssistantHost` capabilities are wired up in this environment — surfaced as a
+   * terse "Environment Capabilities" section so the model rarely calls a tool it can't use (§11.3).
+   * Omit entirely to omit the section (e.g. when the caller doesn't yet know its host's shape).
+   */
+  capabilities?: { files?: boolean; renderCheck?: boolean } | undefined;
 }
 
 // ─── Jx Schema Reference (condensed) ────────────────────────────────────────
@@ -372,11 +492,12 @@ When asked to build a site with multiple pages:
  * Build a dynamic system prompt for the AI assistant.
  *
  * @param {object} opts
- * @param {import("../state.js").JxNode} [opts.document] - The currently open Jx document
+ * @param {JxMutableNode} [opts.document] - The currently open Jx document
  * @param {object} [opts.projectConfig] - The project.json config if available
- * @param {import("../files/components.js").ComponentEntry[]} [opts.components] - Available
- *   components
+ * @param {ComponentEntry[]} [opts.components] - Available components
  * @param {string} [opts.projectRoot] - Project root path
+ * @param {{ files?: boolean; renderCheck?: boolean }} [opts.capabilities] - Which optional
+ *   AssistantHost capabilities are present in this environment
  * @returns {string}
  */
 export function buildSystemPrompt({
@@ -384,6 +505,7 @@ export function buildSystemPrompt({
   projectConfig,
   components,
   projectRoot,
+  capabilities,
 }: BuildSystemPromptOptions = {}) {
   // 1. Role & capabilities
   const sections = [
@@ -444,6 +566,15 @@ Be concise. Don't explain what Jx is unless asked. Just build.`,
     if (projectSummary) {
       sections.push(`## Project Context\n\n${projectSummary}`);
     }
+  }
+
+  // 6a. Environment capabilities (§11.3) — terse, so the model rarely calls a dead tool.
+  if (capabilities) {
+    const lines = [
+      `- File operations (create_component, create_page, open_document): ${capabilities.files ? "available" : "not available in this environment"}.`,
+      `- Render checking (extra validation pass after an edit): ${capabilities.renderCheck ? "available" : "not available in this environment"}.`,
+    ];
+    sections.push(`## Environment Capabilities\n\n${lines.join("\n")}`);
   }
 
   // 7. Error recovery guidance

@@ -11,6 +11,7 @@ import { createChatState, createToolRegistry } from "@jxsuite/ai";
 import type { StreamingClient } from "@jxsuite/ai/streaming-client";
 import type { JxMutableNode } from "@jxsuite/schema/types";
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { workspace } from "../src/workspace/workspace";
 
 /** The normalized stream event the StreamingClient emits (not exported, so derived here). */
 type StreamEvent =
@@ -244,5 +245,101 @@ describe("document-assistant", () => {
 
     globalThis.localStorage.setItem(LEGACY_PERSIST_KEY, "[]");
     expect(createDocumentAssistant().chatState.messages).toHaveLength(0);
+  });
+
+  test("host.document exercises move_node, remove_node, set_text, set_style, add_state, and update_state", async () => {
+    nextRounds = [
+      toolCallRound("c1", "move_node", {
+        fromPath: ["children", 0, "children", 0],
+        toIndex: 0,
+        toParentPath: ["children", 1],
+      }),
+      [{ stopReason: "stop", type: "done" }],
+    ];
+    const a = createDocumentAssistant();
+    const tab = resetWorkspaceWithTab({
+      children: [
+        { children: [{ tagName: "p", textContent: "move me" }], tagName: "section" },
+        { children: [], tagName: "aside" },
+      ],
+      tagName: "div",
+    });
+    await a.sendMessage("move the paragraph into the aside");
+    const roots = tab.doc.document.children as JxMutableNode[];
+    expect(roots[0]!.children).toHaveLength(0);
+    expect((roots[1]!.children as JxMutableNode[])[0]!.tagName).toBe("p");
+    expect(a.chatState.status).toBe("idle");
+
+    nextRounds = [
+      toolCallRound("c2", "set_text", { path: ["children", 0], value: "fresh" }),
+      [{ stopReason: "stop", type: "done" }],
+    ];
+    await a.sendMessage("retext");
+    const afterText = tab.doc.document.children as JxMutableNode[];
+    expect((afterText[0]!.children as string[])[0]).toBe("fresh");
+
+    nextRounds = [
+      toolCallRound("c3", "set_style", {
+        path: [],
+        property: "backgroundColor",
+        value: "var(--color-accent)",
+      }),
+      [{ stopReason: "stop", type: "done" }],
+    ];
+    await a.sendMessage("style it");
+    expect(tab.doc.document.style?.backgroundColor).toBe("var(--color-accent)");
+
+    nextRounds = [
+      toolCallRound("c4", "add_state", { key: "count", value: 0 }),
+      [{ stopReason: "stop", type: "done" }],
+    ];
+    await a.sendMessage("add state");
+    expect(tab.doc.document.state?.count).toBe(0);
+
+    nextRounds = [
+      toolCallRound("c5", "update_state", { key: "count", value: 5 }),
+      [{ stopReason: "stop", type: "done" }],
+    ];
+    await a.sendMessage("update state");
+    expect(tab.doc.document.state?.count).toBe(5);
+
+    nextRounds = [
+      toolCallRound("c6", "update_state", { key: "count", value: null }),
+      [{ stopReason: "stop", type: "done" }],
+    ];
+    await a.sendMessage("remove state");
+    expect(tab.doc.document.state).not.toHaveProperty("count");
+
+    nextRounds = [
+      toolCallRound("c7", "remove_node", { path: ["children", 0] }),
+      [{ stopReason: "stop", type: "done" }],
+    ];
+    await a.sendMessage("remove first child");
+    expect(tab.doc.document.children).toHaveLength(1);
+  });
+
+  test("buildPrompt includes project context once workspace projectConfig/projectRoot are set", async () => {
+    workspace.projectConfig = { name: "Demo Project", style: { "--color-accent": "#3b82f6" } };
+    workspace.projectRoot = "/tmp/demo-project";
+    try {
+      nextRounds = [[{ stopReason: "stop", type: "done" }]];
+      const a = createDocumentAssistant();
+      resetWorkspaceWithTab({ tagName: "div", children: [] });
+      // ResetWorkspaceWithTab doesn't touch projectConfig/projectRoot — re-assert they're live.
+      workspace.projectConfig = { name: "Demo Project", style: { "--color-accent": "#3b82f6" } };
+      workspace.projectRoot = "/tmp/demo-project";
+      await a.sendMessage("hi");
+      expect(a.chatState.status).toBe("idle");
+    } finally {
+      workspace.projectConfig = null;
+      workspace.projectRoot = null;
+    }
+  });
+
+  test("listSessions reflects a persisted session", async () => {
+    nextRounds = [[{ stopReason: "stop", type: "done" }]];
+    const a = createDocumentAssistant();
+    await a.sendMessage("hi there");
+    expect(a.listSessions().some((s) => s.id === a.activeSessionId())).toBe(true);
   });
 });

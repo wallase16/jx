@@ -2,24 +2,41 @@
 /**
  * Document-assistant.js — Stack B (canonical) document AI assistant session
  *
- * Wires the @jxsuite/ai infrastructure (chat-state, proxy streaming client, tool registry) to
- * the active Jx document via `transactDoc()`-backed tools, and drives the error-correction
- * agent loop. See docs/ai-assistant-decision.md.
+ * Wires `@jxsuite/assistant` (tools, agent loop, system prompt, validation) to the active Jx
+ * document via an `AssistantHost` whose `document` capability delegates to `tabs/transact`, and
+ * drives the error-correction agent loop. See docs/ai-assistant-decision.md and
+ * specs/ai-assistant.md §11 (the `AssistantHost` seam).
  *
  * @license MIT
  */
 
 import { createChatState, createProxyStreamingClient, createToolRegistry } from "@jxsuite/ai";
-import type { ProjectConfig } from "@jxsuite/schema/types";
+import { registerAiTools, runAgentLoop, buildSystemPrompt, trimContext } from "@jxsuite/assistant";
+import type { AssistantHost } from "@jxsuite/assistant/host";
+import type {
+  JxMutableNode,
+  JxPath,
+  JxStateDefinition,
+  ProjectConfig,
+} from "@jxsuite/schema/types";
 import { getPlatform } from "../platform";
 import { activeTab, workspace } from "../workspace/workspace";
 import { toRaw } from "../reactivity";
 import { componentRegistry } from "../files/components";
-import { registerAiTools } from "./ai-tools";
-import { runAgentLoop } from "./tool-executor";
-import { buildSystemPrompt } from "./ai-system-prompt";
+import { getNodeAtPath } from "../state";
+import {
+  beginBatch,
+  endBatch,
+  isBatching,
+  mutateInsertNode,
+  mutateMoveNode,
+  mutateRemoveNode,
+  mutateUpdateProperty,
+  mutateUpdateStyle,
+  transactDoc,
+} from "../tabs/transact";
+import type { JxNodeValue } from "../tabs/transact";
 import { getBaseUrl, getModel, getOpenAiKey } from "./ai-settings";
-import { trimContext } from "./context-manager";
 import { renderCheck } from "./render-critic";
 import { openFileInTab } from "../files/files";
 import * as sessionStore from "./ai-session-store";
@@ -32,6 +49,132 @@ import * as sessionStore from "./ai-session-store";
  */
 function projectRoot() {
   return workspace.projectRoot || "";
+}
+
+/**
+ * Build the studio `AssistantHost`: `document` delegates every mutation to a `transactDoc()`-
+ * wrapped `mutate*` helper from `tabs/transact.ts` (so AI edits share undo/redo history with manual
+ * edits), `getDocument()` de-proxies the reactive document with `toRaw()` before it reaches
+ * validation/serialization, `renderCheck` wraps `render-critic.ts`, and `files`/`project` carry the
+ * platform file API and the active project's style/config/components.
+ *
+ * @returns {AssistantHost}
+ */
+function buildStudioHost(): AssistantHost {
+  const getTab = () => activeTab.value;
+
+  const document: AssistantHost["document"] = {
+    beginBatch: () => beginBatch(getTab()),
+    endBatch: () => endBatch(),
+    getDocument: () => {
+      const tab = getTab();
+      return tab ? (toRaw(tab.doc.document) as JxMutableNode) : null;
+    },
+    getNodeAtPath: (path: JxPath) => {
+      const tab = getTab();
+      return tab ? getNodeAtPath(tab.doc.document, path) : undefined;
+    },
+    insertNode: (parentPath, index, node) => {
+      const tab = getTab();
+      if (tab) {
+        transactDoc(tab, (t) => mutateInsertNode(t, parentPath, index, node));
+      }
+    },
+    isBatching: () => isBatching(),
+    moveNode: (fromPath, toParentPath, toIndex) => {
+      const tab = getTab();
+      if (tab) {
+        transactDoc(tab, (t) => mutateMoveNode(t, fromPath, toParentPath, toIndex));
+      }
+    },
+    removeNode: (path) => {
+      const tab = getTab();
+      if (tab) {
+        transactDoc(tab, (t) => mutateRemoveNode(t, path));
+      }
+    },
+    setText: (path, value) => {
+      const tab = getTab();
+      if (!tab) {
+        return;
+      }
+      transactDoc(tab, (t) => {
+        const node = getNodeAtPath(t.doc.document, path);
+        delete node.textContent;
+        node.children = [value];
+      });
+    },
+    updateProperty: (path, key, value) => {
+      const tab = getTab();
+      if (tab) {
+        transactDoc(tab, (t) => mutateUpdateProperty(t, path, key, value as JxNodeValue));
+      }
+    },
+    updateState: (key: string, value: JxStateDefinition | undefined) => {
+      const tab = getTab();
+      if (!tab) {
+        return;
+      }
+      transactDoc(tab, (t) => {
+        /*
+         * Directly mutate — bypass mutateUpdateProperty because its "" → delete behaviour
+         * (transact.ts:248) is wrong for state defaults (e.g. "title": "").
+         */
+        if (value === undefined) {
+          if (t.doc.document.state) {
+            delete t.doc.document.state[key];
+          }
+          return;
+        }
+        if (!t.doc.document.state) {
+          t.doc.document.state = {};
+        }
+        t.doc.document.state[key] = value;
+      });
+    },
+    updateStyle: (path, property, value) => {
+      const tab = getTab();
+      if (tab) {
+        transactDoc(tab, (t) => mutateUpdateStyle(t, path, property, value));
+      }
+    },
+  };
+
+  // Captured once at host-build time (session start) — matches today's registerAiTools call,
+  // Which received projectStyle as a one-time snapshot rather than a live binding.
+  const hostProjectConfig = (workspace.projectConfig as ProjectConfig | null) || undefined;
+  const hostProjectStyle = hostProjectConfig?.style as Record<string, string> | undefined;
+  const hostProjectRoot = workspace.projectRoot || undefined;
+  const hostComponents = componentRegistry.length > 0 ? componentRegistry : undefined;
+
+  const project: NonNullable<AssistantHost["project"]> = {};
+  if (hostComponents) {
+    project.components = hostComponents;
+  }
+  if (hostProjectConfig) {
+    project.projectConfig = hostProjectConfig;
+  }
+  if (hostProjectRoot) {
+    project.projectRoot = hostProjectRoot;
+  }
+  if (hostProjectStyle) {
+    project.projectStyle = hostProjectStyle;
+  }
+
+  return {
+    document,
+    files: {
+      openDocument: openFileInTab,
+      saveFile: async (relPath: string, content: string) => {
+        const plat = getPlatform();
+        await plat.writeFile(relPath, content);
+      },
+    },
+    project,
+    renderCheck: renderCheck as (
+      doc: unknown,
+    ) => Promise<{ ok: true } | { ok: false; error: string }>,
+  };
 }
 
 /**
@@ -51,21 +194,9 @@ function projectRoot() {
 export function createDocumentAssistant() {
   const chatState = createChatState({ model: getModel() });
 
+  const host = buildStudioHost();
   const toolRegistry = createToolRegistry();
-  registerAiTools(toolRegistry, {
-    getTab: () => activeTab.value,
-    saveFile: async (relPath: string, content: string) => {
-      const plat = getPlatform();
-      await plat.writeFile(relPath, content);
-    },
-    renderCheck: renderCheck as (
-      doc: unknown,
-    ) => Promise<{ ok: true } | { ok: false; error: string }>,
-    openDocument: openFileInTab,
-    projectStyle: (workspace.projectConfig as ProjectConfig | null)?.style as
-      | Record<string, string>
-      | undefined,
-  });
+  registerAiTools(toolRegistry, host);
 
   let controller: AbortController | null = null;
 
@@ -75,9 +206,10 @@ export function createDocumentAssistant() {
   function buildPrompt() {
     const tab = activeTab.value;
     return buildSystemPrompt({
-      document: tab ? toRaw(tab.doc.document) : undefined,
-      projectConfig: (workspace.projectConfig as ProjectConfig | null) || undefined,
+      capabilities: { files: Boolean(host.files), renderCheck: Boolean(host.renderCheck) },
       components: componentRegistry.length > 0 ? componentRegistry : undefined,
+      document: tab ? (toRaw(tab.doc.document) as JxMutableNode) : undefined,
+      projectConfig: (workspace.projectConfig as ProjectConfig | null) || undefined,
       projectRoot: workspace.projectRoot || undefined,
     });
   }
@@ -111,22 +243,20 @@ export function createDocumentAssistant() {
       // (before the user sets a key/model), so the picker's choice must be picked up here.
       chatState.setModel(getModel());
       const streamingClient = createProxyStreamingClient({
+        apiKey: getOpenAiKey() || undefined,
+        baseUrl: getBaseUrl() || undefined,
         chatUrl,
         model: chatState.model,
-        // Sent as X-Api-Key; the proxy falls back to the server's OPENAI_API_KEY when empty.
-        apiKey: getOpenAiKey() || undefined,
-        // Optional OpenAI-compatible endpoint override; empty uses the proxy default.
-        baseUrl: getBaseUrl() || undefined,
       });
 
       controller = new AbortController();
       await runAgentLoop({
         chatState,
-        streamingClient,
-        toolRegistry,
-        systemPrompt: buildPrompt(),
+        host,
         signal: controller.signal,
-        getTab: () => activeTab.value,
+        streamingClient,
+        systemPrompt: buildPrompt(),
+        toolRegistry,
       });
     } catch (error) {
       /*
@@ -231,13 +361,13 @@ export function createDocumentAssistant() {
   restoreChat();
 
   return {
+    activeSessionId,
     chatState,
+    deleteSession,
+    listSessions,
+    newChat,
+    openSession,
     sendMessage,
     stop,
-    newChat,
-    listSessions,
-    openSession,
-    deleteSession,
-    activeSessionId,
   };
 }

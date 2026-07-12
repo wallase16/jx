@@ -2,10 +2,14 @@
  * Real-llm.js — headless real-LLM harness for the Stack B agent loop.
  *
  * Assembles the _production_ pieces (`runAgentLoop`, `registerAiTools`, `buildSystemPrompt`,
- * `validateDoc`) and drives them against a real OpenAI-compatible endpoint — the same code the
- * studio runs, minus the browser. This is the fast, deterministic place to iterate the system
- * prompt / tools / recovery loop (the logic axes); the studio keeps the browser-only axes
- * (rendered-DOM Correctness, Undo/Redo).
+ * `validateDoc` from `@jxsuite/assistant`) and drives them against a real OpenAI-compatible
+ * endpoint — the same code the studio runs, minus the browser. This is the fast, deterministic
+ * place to iterate the system prompt / tools / recovery loop (the logic axes); the studio keeps the
+ * browser-only axes (rendered-DOM Correctness, Undo/Redo). The headless `AssistantHost` built here
+ * wires `document.*` to the exact same `tabs/transact.ts` mutators the studio host uses, over a
+ * `createTab()`-backed in-memory document (reactive, like a studio `Tab`, so `getDocument()`
+ * de-proxies with `toRaw()` before it reaches validation/serialization — see specs/ai-assistant.md
+ * §11.3's "Mapping notes").
  *
  * See docs/ai-assistant-headless-harness.md §3 Step 1.
  *
@@ -21,15 +25,91 @@ import "../with-dom.ts";
 
 import { createChatState, createToolRegistry, createOpenAIStreamingClient } from "@jxsuite/ai";
 import type { ToolRegistry } from "@jxsuite/ai/tools";
+import { registerAiTools, runAgentLoop, buildSystemPrompt } from "@jxsuite/assistant";
+import type { AssistantHost } from "@jxsuite/assistant/host";
 import { createTab, disposeTab } from "../../src/tabs/tab";
-import { registerAiTools } from "../../src/services/ai-tools";
-import { runAgentLoop } from "../../src/services/tool-executor";
-import { buildSystemPrompt } from "../../src/services/ai-system-prompt";
-import { validateDoc } from "../../src/services/jx-validate";
+import type { Tab } from "../../src/tabs/tab";
+import { toRaw } from "../../src/reactivity";
+import { getNodeAtPath } from "../../src/state";
+import {
+  beginBatch,
+  endBatch,
+  isBatching,
+  mutateInsertNode,
+  mutateMoveNode,
+  mutateRemoveNode,
+  mutateUpdateProperty,
+  mutateUpdateStyle,
+  transactDoc,
+} from "../../src/tabs/transact";
+import type { JxNodeValue } from "../../src/tabs/transact";
 import type { ComponentEntry } from "../../src/files/components";
 import type { JxMutableNode, ProjectConfig } from "@jxsuite/schema/types";
 
 const DEFAULT_MODEL = "gpt-5.4";
+
+/**
+ * Build the headless `AssistantHost`: `document` delegates to the same `transactDoc()`-wrapped
+ * `mutate*` helpers the studio host uses (so undo/redo/patch recording behave identically), and
+ * `files.saveFile` is wired to the harness's write sink when provided. `files.openDocument`
+ * degrades explicitly — the headless harness has exactly one working document and never switches
+ * it, matching today's behavior where `openDocument` was never injected into `registerAiTools` here
+ * (the tool reported unavailable).
+ */
+function buildHeadlessHost(
+  tab: Tab,
+  saveFile?: ((relPath: string, content: string) => Promise<void>) | undefined,
+): AssistantHost {
+  const document: AssistantHost["document"] = {
+    beginBatch: () => beginBatch(tab),
+    endBatch: () => endBatch(),
+    getDocument: () => toRaw(tab.doc.document) as JxMutableNode,
+    getNodeAtPath: (path) => getNodeAtPath(tab.doc.document, path),
+    insertNode: (parentPath, index, node) =>
+      transactDoc(tab, (t) => mutateInsertNode(t, parentPath, index, node)),
+    isBatching: () => isBatching(),
+    moveNode: (fromPath, toParentPath, toIndex) =>
+      transactDoc(tab, (t) => mutateMoveNode(t, fromPath, toParentPath, toIndex)),
+    removeNode: (path) => transactDoc(tab, (t) => mutateRemoveNode(t, path)),
+    setText: (path, value) =>
+      transactDoc(tab, (t) => {
+        const node = getNodeAtPath(t.doc.document, path);
+        delete node.textContent;
+        node.children = [value];
+      }),
+    updateProperty: (path, key, value) =>
+      transactDoc(tab, (t) => mutateUpdateProperty(t, path, key, value as JxNodeValue)),
+    updateState: (key, value) =>
+      transactDoc(tab, (t) => {
+        if (value === undefined) {
+          if (t.doc.document.state) {
+            delete t.doc.document.state[key];
+          }
+          return;
+        }
+        if (!t.doc.document.state) {
+          t.doc.document.state = {};
+        }
+        t.doc.document.state[key] = value;
+      }),
+    updateStyle: (path, property, value) =>
+      transactDoc(tab, (t) => mutateUpdateStyle(t, path, property, value)),
+  };
+
+  if (!saveFile) {
+    return { document };
+  }
+
+  return {
+    document,
+    files: {
+      openDocument: async () => {
+        throw new Error("File navigation is not available in this environment.");
+      },
+      saveFile,
+    },
+  };
+}
 
 /**
  * Build a fully-wired headless harness around one working document.
@@ -72,11 +152,10 @@ export function buildRealHarness({
   const chatState = createChatState({ model });
 
   const toolRegistry = createToolRegistry() as ToolRegistry;
-  registerAiTools(toolRegistry, {
-    getTab: () => tab,
-    validate: validateDoc,
-    saveFile,
-  } as Parameters<typeof registerAiTools>[1]);
+  const host = buildHeadlessHost(tab, saveFile);
+  // Default `validate` (validateDoc) is the real schema check, so the loop self-corrects just like
+  // Production — registerAiTools falls back to it whenever host.validation is absent.
+  registerAiTools(toolRegistry, host);
 
   const temperature =
     process.env.JX_AI_TEMP === undefined ? undefined : Number(process.env.JX_AI_TEMP);
@@ -100,6 +179,7 @@ export function buildRealHarness({
     chatState,
     toolRegistry,
     client,
+    host,
     systemPrompt,
     model,
     dispose: () => disposeTab(tab),
@@ -117,6 +197,7 @@ export async function runPrompt(h: ReturnType<typeof buildRealHarness>, userText
   h.chatState.sendMessage(userText);
   await runAgentLoop({
     chatState: h.chatState,
+    host: h.host,
     streamingClient: h.client,
     toolRegistry: h.toolRegistry,
     systemPrompt: h.systemPrompt,

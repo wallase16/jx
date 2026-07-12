@@ -1,5 +1,5 @@
 /**
- * Jx-validate.js — cached Jx document schema validation for the AI assistant.
+ * Validate.js — cached Jx document schema validation for the AI assistant.
  *
  * Uses `@jxsuite/schema`'s pre-generated `schema.json` (the committed output of `generateSchema()`)
  * as the eval signal for the agent loop (ADR docs/ai-assistant-decision.md §6b). We import the
