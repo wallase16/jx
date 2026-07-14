@@ -20,11 +20,13 @@ type StreamEvent =
 let nextRounds: StreamEvent[][] = [];
 let createErrorMessage: string | null = null;
 let lastClientOpts: Record<string, unknown> | null = null;
+let lastSystemPrompt: string | null = null;
 
 function fakeClient(rounds: StreamEvent[][]): StreamingClient {
   let call = 0;
   return {
-    async *streamChat() {
+    async *streamChat(_messages, _tools, systemPrompt) {
+      lastSystemPrompt = systemPrompt;
       const events = rounds[call] ?? [{ stopReason: "stop", type: "done" }];
       call += 1;
       for (const e of events) {
@@ -74,6 +76,7 @@ beforeEach(() => {
   nextRounds = [];
   createErrorMessage = null;
   lastClientOpts = null;
+  lastSystemPrompt = null;
 });
 
 afterEach(() => {
@@ -341,5 +344,60 @@ describe("document-assistant", () => {
     const a = createDocumentAssistant();
     await a.sendMessage("hi there");
     expect(a.listSessions().some((s) => s.id === a.activeSessionId())).toBe(true);
+  });
+});
+
+describe("document-assistant — perception (§12)", () => {
+  test("advertises the perception capability in the system prompt", async () => {
+    nextRounds = [[{ stopReason: "stop", type: "done" }]];
+    const a = createDocumentAssistant();
+    await a.sendMessage("hi");
+    expect(lastSystemPrompt).toContain("Canvas perception");
+    expect(lastSystemPrompt).toMatch(/Canvas perception.*available/);
+  });
+
+  test("prepends an ephemeral selection addendum when a node is selected", async () => {
+    const tab = resetWorkspaceWithTab({
+      tagName: "div",
+      children: [{ tagName: "button", textContent: "Save" }],
+    });
+    tab.session.selection = ["children", 0];
+    nextRounds = [[{ stopReason: "stop", type: "done" }]];
+
+    const a = createDocumentAssistant();
+    await a.sendMessage("make this bigger");
+
+    expect(lastSystemPrompt).toContain("Current selection");
+    expect(lastSystemPrompt).toContain("<button>");
+    expect(lastSystemPrompt).toContain(JSON.stringify(["children", 0]));
+    // The addendum is ephemeral — it must never leak into the PERSISTED user message.
+    const persisted = persistedMessages();
+    const userMsg = persisted?.find((m) => m.role === "user");
+    expect(userMsg?.content).toBe("make this bigger");
+    expect(userMsg?.content).not.toContain("Current selection");
+  });
+
+  test("omits the selection addendum when nothing is selected", async () => {
+    nextRounds = [[{ stopReason: "stop", type: "done" }]];
+    const a = createDocumentAssistant();
+    await a.sendMessage("hi");
+    expect(lastSystemPrompt).not.toContain("Current selection");
+  });
+
+  test("re-reads the selection on every send (not captured once at session creation)", async () => {
+    const tab = resetWorkspaceWithTab({
+      tagName: "div",
+      children: [{ tagName: "button", textContent: "Save" }],
+    });
+    nextRounds = [[{ stopReason: "stop", type: "done" }]];
+    const a = createDocumentAssistant();
+
+    await a.sendMessage("first, nothing selected");
+    expect(lastSystemPrompt).not.toContain("Current selection");
+
+    tab.session.selection = ["children", 0];
+    nextRounds = [[{ stopReason: "stop", type: "done" }]];
+    await a.sendMessage("second, now selected");
+    expect(lastSystemPrompt).toContain("Current selection");
   });
 });

@@ -732,6 +732,103 @@ export function registerAiTools(registry: Pick<ToolRegistry, "register">, host: 
     }),
   );
 
+  // ── get_selection ──────────────────────────────────────────────────────
+
+  registry.register(
+    createToolDefinition({
+      name: "get_selection",
+      description:
+        "Get the node currently selected in the canvas, if any. Returns its path and tagName, " +
+        "or null if nothing is selected. Use this before an ambiguous request like 'make this " +
+        "bigger' or 'change its color' to find out which node the user means.",
+      parameters: { type: "object", properties: {}, required: [] },
+      execute() {
+        if (!host.perception) {
+          return {
+            success: false,
+            error: "Canvas perception is not available in this environment.",
+          };
+        }
+        const path = host.perception.getSelection();
+        if (!path) {
+          return { success: true, data: null, summary: "Nothing is currently selected." };
+        }
+        const node = host.document.getNodeAtPath(path) as JxMutableNode | undefined;
+        return { success: true, data: { path, tagName: node?.tagName ?? "element" } };
+      },
+    }),
+  );
+
+  // ── describe_canvas ────────────────────────────────────────────────────
+
+  registry.register(
+    createToolDefinition({
+      name: "describe_canvas",
+      description:
+        "Get a summary of what's actually rendered on the canvas right now: each visible " +
+        "node's path, tag, on-screen rect, a short text snippet, and whether it's hidden. Use " +
+        "this to check ground truth against the document tree — e.g. a node with hidden: true, " +
+        "or which $switch case is actually active — and to spot existing components you can " +
+        "reuse instead of re-authoring equivalent markup.",
+      parameters: {
+        type: "object",
+        properties: {
+          root: {
+            type: "array",
+            description: `${PATH_DESCRIPTION} Omit to describe the whole rendered canvas.`,
+            items: { type: ["string", "number"] },
+          },
+        },
+        required: [],
+      },
+      async execute(args) {
+        if (!host.perception) {
+          return {
+            success: false,
+            error: "Canvas perception is not available in this environment.",
+          };
+        }
+        const { root } = args as { root?: JxPath };
+        const nodes = await host.perception.getRenderedTree(root ? { root } : undefined);
+        return { success: true, data: nodes };
+      },
+    }),
+  );
+
+  // ── measure_nodes ───────────────────────────────────────────────────────
+
+  registry.register(
+    createToolDefinition({
+      name: "measure_nodes",
+      description:
+        "Get the current on-screen rect (x, y, width, height) of one or more nodes by path. " +
+        "Use this before a size/layout-aware edit — e.g. 'make this button larger' needs to " +
+        "know its current size first.",
+      parameters: {
+        type: "object",
+        properties: {
+          paths: {
+            type: "array",
+            description: "One or more node paths to measure.",
+            items: { type: "array", items: { type: ["string", "number"] } },
+          },
+        },
+        required: ["paths"],
+      },
+      async execute(args) {
+        if (!host.perception) {
+          return {
+            success: false,
+            error: "Canvas perception is not available in this environment.",
+          };
+        }
+        const { paths } = args as { paths: JxPath[] };
+        const rects = await host.perception.measure(paths);
+        return { success: true, data: rects };
+      },
+    }),
+  );
+
   registry.register(
     createToolDefinition({
       name: "remove_node",

@@ -504,6 +504,55 @@ links to routes — i.e. the parts that depend on the system prompt and live LLM
 
 ---
 
+## 9.6 Layer 7 — Perception rendered-DOM & highlight-timing (chrome-devtools)
+
+**Goal:** Verify the two perception axes the headless harness structurally _cannot_ (§12.6 of
+`specs/ai-assistant.md`). happy-dom stubs `getBoundingClientRect` to zeroes and never paints, so the
+L6 mock-perception tests prove the _shape_ of `enumerateRenderedTree`/`applyHighlight` but not that a
+live engine reports real layout geometry or that a highlight actually paints and clears on its TTL.
+This layer closes that gap in a real Chromium via the `chrome-devtools` MCP.
+
+**No dev server, LLM, or auth gate.** Unlike L1–L6, this layer drives the shipped
+[iframe-perception.ts](../packages/studio/src/canvas/iframe-perception.ts) functions directly against
+a small stamped fixture — the message-protocol plumbing around them is already locked by
+`iframe-entry.test.ts` (happy-dom) and `perception-host.test.ts`, so L7 isolates exactly the
+live-engine behavior those can't reach.
+
+### 9.6.1 Harness
+
+- **Fixture entry:** [perception-eval.entry.ts](../packages/studio/tests/browser/perception-eval.entry.ts)
+  imports the REAL `enumerateRenderedTree`/`applyHighlight`, stamps a `data-jx-path` fixture (two
+  side-by-side buttons + one `display:none` span), and exposes `window.perceptionEval.runAll(ttl)`
+  (returns a structured `{ ok, checks, nodes }` report) plus an on-page results table so the file is
+  also watchable by simply opening it.
+- **Build:** `bun run packages/studio/tests/browser/build-perception-eval.ts` bundles it (IIFE, all
+  JS inlined) into `tests/browser/dist/perception-eval.html` (gitignored) and prints the `file://`
+  URL.
+- **Drive:** launch Chrome per §2.2 (headless is fine — the assertions read computed style, not
+  pixels), `new_page` the `file://` URL, then `evaluate_script(() => window.perceptionEval.runAll())`
+  and assert `ok === true`. `take_screenshot` after a `highlightForScreenshot()` for the visual
+  paint artifact.
+
+### 9.6.2 Checks (all must pass)
+
+| Axis           | Check                                                       | Why happy-dom can't                                |
+| -------------- | ----------------------------------------------------------- | -------------------------------------------------- |
+| rendered-DOM   | root enumerates with 3 stamped children                     | (also holds headless — sanity anchor)              |
+| rendered-DOM   | visible button has non-zero width/height                    | happy-dom rects are all-zero                       |
+| rendered-DOM   | side-by-side buttons have **distinct x**                    | needs a real layout engine                         |
+| rendered-DOM   | visible button carries its `textSnippet`                    | (also holds headless — sanity anchor)              |
+| rendered-DOM   | `display:none` span flagged `hidden` with a zero rect       | needs real `getComputedStyle`                      |
+| highlight-time | highlight paints a **resolved** `solid 2px rgb(59,130,246)` | happy-dom never resolves/paints the inline outline |
+| highlight-time | highlight **clears to its original** outline after the TTL  | needs a real `setTimeout` + paint lifecycle        |
+
+### 9.6.3 When to re-run
+
+Re-run L7 whenever `iframe-perception.ts`, `geometry.ts`'s `rectOf`, or the `HIGHLIGHT_OUTLINE`/TTL
+constants change. A regression here that L6 misses means the break is in real-engine geometry or
+paint, not in the message protocol (which L6 + the happy-dom unit tests would catch first).
+
+---
+
 ## 10. The Polish Loop (Meta-Process)
 
 This is the **outer loop** — the process we follow for every test in Layers 1–5.

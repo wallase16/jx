@@ -1,9 +1,13 @@
 # Assistant SDK + Canvas-Awareness — Plan
 
-**Status:** Phases 0–2 complete — `specs/ai-assistant.md` is authored; eval hardening done
+**Status:** Phases 0–3 complete — `specs/ai-assistant.md` is authored; eval hardening done
 (19/19 headless, worst-of-3); seam extraction done (`packages/assistant` +
-`AssistantHost`, same 19/19 gate held). Phase 3 (perception, launch milestone) is next.
-**Date:** 2026-07-12
+`AssistantHost`, same 19/19 gate held); perception (launch milestone) done — protocol
+messages, `perception-host.ts`, three new tools, automatic selection context, highlight
+feedback, and the L6 eval layer all shipped, gate now 21/21 headless (worst-of-3). The Phase-3
+follow-up (L7 chrome-devtools browser eval for the rendered-DOM/highlight-timing axes) is also done
+(7/7, see the 2026-07-13 turnover). Phase 4 (extensibility) is next.
+**Date:** 2026-07-13
 **Owner:** Gideon
 **Branch:** `feat/assistant-sdk-spec` (off `upstream/main`)
 **Relates to:** `specs/ai-assistant.md` (this plan's Phase 0 output — done),
@@ -132,12 +136,12 @@ consumers are already solved: `/__studio/ai/chat` proxy + managed mode, or
   Converted studio's `document-assistant.ts` and the headless eval harness
   (`tests/harness/real-llm.ts`) to the two reference host implementations. Gate: **19/19
   headless** (worst-of-3), exact parity with the pre-refactor baseline. Full turnover below.
-- **Phase 3 — Perception (launch milestone):** protocol messages, `perception-host.ts`,
+- **Phase 3 — Perception (launch milestone): done.** protocol messages, `perception-host.ts`,
   three tools, auto-selection context, highlight feedback; new L6 eval layer (mock
   `PerceptionCapability` with preset selection — "make THIS button larger" asserts the
   mutation lands at the selected path; component-detection assertions — model reuses an
   existing component tag instead of re-authoring markup). Rendered-DOM axes stay in the
-  chrome-devtools browser eval.
+  chrome-devtools browser eval. Gate: **21/21 headless** (worst-of-3). Full turnover below.
 - **Phase 4 — Extensibility:** publish `@jxsuite/assistant`, CLI reference host, extensions
   `assistant` admission block.
 - **Phase 5 (optional):** server-side document-session API.
@@ -280,3 +284,93 @@ consumers are already solved: `/__studio/ai/chat` proxy + managed mode, or
 perception-host.ts`, three new tools (`get_selection`, `describe_canvas`, `measure_nodes`),
     automatic selection context on send, post-tool highlight feedback, and a new L6 eval layer
     (mock `PerceptionCapability`, selection-targeting + component-detection assertions).
+- **2026-07-12 — Phase 3 done.** Shipped §12 in full — the launch milestone.
+  - `PerceptionCapability`/`RenderedNode`/`SerializableRect` added to `@jxsuite/assistant/host.ts`
+    as fresh interfaces (not imported from studio's `iframe-protocol.ts` — the assistant core must
+    never depend on canvas modules; the same "small deliberate duplication" precedent as
+    `VOID_ELEMENTS`/`flattenTree`, §11.2). Three new tools registered in `tools.ts`
+    (`get_selection`, `describe_canvas`, `measure_nodes`), all gated on `host.perception` and
+    degrading to the standard "not available in this environment" `ToolResult` otherwise.
+    `system-prompt.ts` gained a `capabilities.perception` line and the three tools in its role
+    description. `agent-loop.ts` gained `touchedPathsFor()` — a best-effort tool-name→path map
+    (covers `set_property`/`set_style`/`set_text`/`add_child`/`move_node`/`remove_node`) that
+    collects every path touched across the WHOLE turn (not per round) and calls
+    `host.perception?.highlight?.(paths)` once after `endBatch()`.
+  - Studio: `iframe-protocol.ts` gained `enumerate`/`renderedTree` (reqId-correlated like
+    `measure`/`geometry`) and `highlight` messages. New `canvas/iframe-perception.ts` (runs INSIDE
+    the iframe) implements the `data-jx-path` tree walk (`childCount` counts STAMPED descendants,
+    not raw DOM children; a scoped `enumerate({root})` includes the root element itself, not just
+    its descendants) and `highlight` as a saved/restored inline `outline` style with a `setTimeout`
+    TTL — no injected stylesheet, since the iframe renders arbitrary project content. Both wired
+    into `iframe-entry.ts`'s message switch. New `canvas/perception-host.ts` (parent-side)
+    implements `PerceptionCapability`: `getSelection` reads `tab.session.selection` directly;
+    `getRenderedTree`/`measure` are promise-based round trips over the EXISTING channel
+    (`hostForCanvas`/`postDragMessage`, generic despite their drag-session names) using a per-call
+    negative `reqId` (disjoint from `iframe-host.ts`'s own positive counter) matched via a one-shot
+    `channel.onMessage` listener with a 2s timeout falling back to empty.
+  - `document-assistant.ts`: wired `perception: createPerceptionHost(getTab)` into
+    `buildStudioHost()`, added `capabilities.perception` to the system-prompt call, and resolved
+    §12.5's open question — automatic selection context is **ephemeral, folded into the system
+    prompt** (`selectionContextAddendum()`, recomputed every `buildPrompt()` call), NOT embedded
+    into the persisted user message the way the manual attach-context chip is. Chose this over
+    message-mutation because `chatState.sendMessage(text)` persists whatever it's given; achieving
+    "ephemeral" by mutating stored content pre/post-send would mean fragile surgery on persisted
+    history for the same practical effect the system-prompt route gets for free, and a reloaded
+    session should never replay against a stale selection.
+  - New L6 eval layer (`real-llm.ts`'s `buildMockPerception` + `buildRealHarness({ perception })`,
+    `doc-query.ts`'s new `nodeAt` helper, two new fixtures `sites/test-blank/pages/l6-{selection,
+component}.json`): **L6.1** presets a selection on one of two lookalike buttons and asserts
+    "make this button bigger" grows the SELECTED one, not its sibling; **L6.2** presets a mock
+    rendered-tree naming an already-placed `nav-bar` instance and asserts the model reuses the tag
+    (a second `nav-bar` node) rather than hand-authoring inline markup.
+  - Gate: **21/21 headless** (worst-of-3, gpt-5.4 — the original 18 + L4.6 + new L6.1/L6.2), zero
+    regression. One transient flake observed and NOT chased (L1.5 scored Completeness 2 on one
+    ad-hoc worst-of-3 run; 5/5 clean on an immediate isolated re-run and clean again on a full
+    second worst-of-3 pass — consistent with the kind of model non-determinism already logged and
+    not chased in the Phase 1/2 turnover entries). `bun run lint` / `bun run typecheck` clean
+    repo-wide; `packages/assistant` 86/86 (added tests for the 3 tools, agent-loop highlight
+    collection incl. `move_node`/malformed-args/no-highlight-method branches, and the
+    capabilities line); `packages/studio` 3635/3635 (added `perception-host.test.ts`,
+    `iframe-entry.test.ts` enumerate/highlight round-trip tests, `document-assistant.test.ts`
+    selection-addendum tests); both coverage manifests pass; per-file coverage holds on every new/
+    touched file (`perception-host.ts` 98.72% lines after adding explicit timeout-path tests;
+    `agent-loop.ts` 100% after adding a `move_node`-highlight test). Also fixed a real gap
+    unrelated to the day's own work while here: `packages/assistant` had never been
+    `bun install`ed into the root `node_modules/@jxsuite/` symlink farm (missing entirely,
+    breaking `bun run typecheck` repo-wide the moment anything imported it) — one `bun install`
+    fixed it. Also extended `geometry.test.ts`'s cross-origin-iframe allowlist for the new
+    iframe-bundled `iframe-perception.ts` (it legitimately calls `getComputedStyle` — same realm
+    as the other iframe-bundled modules already allowlisted there).
+  - No coverage-threshold ratchet: neither package's WORST-file coverage rose (the floor is set by
+    pre-existing files this phase didn't touch), so `bunfig.toml` thresholds are unchanged in both
+    packages per the CLAUDE.md ratchet policy (ratchet only when the package's worst-file
+    improves).
+  - Not done this phase (explicitly out of scope, tracked for whoever picks up next): the
+    chrome-devtools browser eval for the rendered-DOM/highlight-TIMING axes (§12.6 says headless
+    can mock the capability's shape but not verify the iframe actually painted the highlight) —
+    the `iframe-entry.test.ts` unit tests prove `applyHighlight`/`enumerateRenderedTree` work
+    against happy-dom, but a live-browser pass confirming the outline is visually correct and
+    times out cleanly in a real Chromium canvas has not been run.
+- **2026-07-13 — Perception browser eval (L7) done.** Closed the one Phase-3 follow-up above: the
+  chrome-devtools browser eval for the rendered-DOM/highlight-TIMING axes (§12.6). Built a
+  self-contained harness under `packages/studio/tests/browser/`: `perception-eval.entry.ts` imports
+  the REAL shipped `enumerateRenderedTree`/`applyHighlight` (not a reimplementation), stamps a
+  `data-jx-path` fixture (two side-by-side buttons + a `display:none` span), and exposes
+  `window.perceptionEval.runAll(ttl)` returning a structured `{ ok, checks, nodes }` report;
+  `build-perception-eval.ts` bundles it (IIFE, all JS inlined) into a single gitignored
+  `tests/browser/dist/perception-eval.html` that opens over `file://` — no dev server, LLM, or auth
+  gate (the message-protocol plumbing is already locked by `iframe-entry.test.ts` +
+  `perception-host.test.ts`, so this isolates only what happy-dom structurally can't do). Drove it
+  live via the `chrome-devtools-nixos` MCP: **7/7 checks green** — real non-zero button geometry with
+  distinct viewport x (alpha.x=64/beta.x=175.69, impossible under happy-dom's all-zero rects), real
+  `getComputedStyle`-based `hidden` flag on the `display:none` span, highlight paints a RESOLVED
+  `solid 2px rgb(59, 130, 246)` outline, and clears back to its original after the TTL. Screenshots
+  captured as evidence (painted, cleared, full on-page harness). Added an §9.6 "Layer 7" section to
+  `docs/ai-assistant-testing-plan.md` (harness, checks table, when-to-re-run). `oxlint`/`tsgo` clean
+  repo-wide; the new files live under `tests/` so they're outside the coverage-manifest/threshold
+  gates and aren't picked up as `bun test` cases. Note: headed Chrome can't be spawned from the
+  agent's Bash sandbox (GUI children get SIGTERM'd on tool return) — headless is used for the
+  automated pass; a human watches by opening the HTML directly (on-page results table + a "Replay
+  highlight" button).
+  - Next: Phase 4 — extensibility. Publish `@jxsuite/assistant`, a CLI reference `AssistantHost`,
+    the extensions `assistant` admission block (§13).

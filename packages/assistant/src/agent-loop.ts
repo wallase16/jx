@@ -16,6 +16,46 @@ import type { AssistantHost } from "./host";
 
 const MAX_ROUNDS = 5;
 
+type JxPath = (string | number)[];
+
+/**
+ * Best-effort map from a tool call's name + args to the document path(s) it touched, so the loop
+ * can highlight exactly what changed on the live canvas after the turn (§12.5). Deliberately
+ * tolerant of a malformed/unexpected args shape (no path found → no paths, never throws) — this
+ * drives a transient visual affordance, not a correctness-critical signal.
+ */
+function touchedPathsFor(name: string, args: Record<string, unknown>): JxPath[] {
+  const asPath = (v: unknown): JxPath | null => (Array.isArray(v) ? (v as JxPath) : null);
+  switch (name) {
+    case "set_property":
+    case "set_style":
+    case "set_text": {
+      const path = asPath(args.path);
+      return path ? [path] : [];
+    }
+    case "add_child": {
+      const parentPath = asPath(args.parentPath);
+      return parentPath && typeof args.index === "number"
+        ? [[...parentPath, "children", args.index]]
+        : [];
+    }
+    case "move_node": {
+      const toParentPath = asPath(args.toParentPath);
+      return toParentPath && typeof args.toIndex === "number"
+        ? [[...toParentPath, "children", args.toIndex]]
+        : [];
+    }
+    case "remove_node": {
+      const path = asPath(args.path);
+      // The node itself is gone — highlight the parent it used to live in instead.
+      return path && path.length >= 2 ? [path.slice(0, -2)] : [];
+    }
+    default: {
+      return [];
+    }
+  }
+}
+
 interface RunAgentLoopOptions {
   chatState: ReturnType<typeof createChatState>;
   streamingClient: StreamingClient;
@@ -42,6 +82,9 @@ export async function runAgentLoop({
 }: RunAgentLoopOptions): Promise<void> {
   const allErrors: string[] = [];
   const appliedSummaries: string[] = [];
+  // Dedupe by serialized path across every round of the turn — one highlight call after the whole
+  // Turn's batch closes, not one per round (§12.5).
+  const touchedPaths = new Map<string, JxPath>();
 
   // Batch all tool-call mutations into a single undo step
   host.document.beginBatch();
@@ -110,14 +153,20 @@ export async function runAgentLoop({
 
       for (const [id, call] of toolCalls) {
         let result;
+        let args: Record<string, unknown> | undefined;
         try {
-          const args = call.arguments ? (JSON.parse(call.arguments) as object) : {};
+          args = call.arguments ? (JSON.parse(call.arguments) as Record<string, unknown>) : {};
           result = await toolRegistry.execute(call.name, args);
         } catch (error) {
           result = {
             success: false,
             error: `Failed to parse arguments: ${(error as Error).message}`,
           };
+        }
+        if (args) {
+          for (const path of touchedPathsFor(call.name, args)) {
+            touchedPaths.set(JSON.stringify(path), path);
+          }
         }
         if (!result.success && result.error) {
           allErrors.push(result.error);
@@ -152,5 +201,8 @@ export async function runAgentLoop({
     );
   } finally {
     host.document.endBatch();
+    if (touchedPaths.size > 0) {
+      host.perception?.highlight?.([...touchedPaths.values()]);
+    }
   }
 }

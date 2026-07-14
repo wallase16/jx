@@ -26,7 +26,12 @@ import "../with-dom.ts";
 import { createChatState, createToolRegistry, createOpenAIStreamingClient } from "@jxsuite/ai";
 import type { ToolRegistry } from "@jxsuite/ai/tools";
 import { registerAiTools, runAgentLoop, buildSystemPrompt } from "@jxsuite/assistant";
-import type { AssistantHost } from "@jxsuite/assistant/host";
+import type {
+  AssistantHost,
+  PerceptionCapability,
+  RenderedNode,
+  SerializableRect,
+} from "@jxsuite/assistant/host";
 import { createTab, disposeTab } from "../../src/tabs/tab";
 import type { Tab } from "../../src/tabs/tab";
 import { toRaw } from "../../src/reactivity";
@@ -44,9 +49,31 @@ import {
 } from "../../src/tabs/transact";
 import type { JxNodeValue } from "../../src/tabs/transact";
 import type { ComponentEntry } from "../../src/files/components";
-import type { JxMutableNode, ProjectConfig } from "@jxsuite/schema/types";
+import type { JxMutableNode, JxPath, ProjectConfig } from "@jxsuite/schema/types";
 
 const DEFAULT_MODEL = "gpt-5.4";
+
+/**
+ * A mock `PerceptionCapability` for the L6 eval layer (§12.6): a preset selection/rendered-tree/
+ * measure fixture, no `highlight` — highlight-timing is a browser-only axis (the headless harness
+ * never mounts a canvas to observe it against).
+ */
+export interface MockPerceptionOptions {
+  selection?: JxPath | null;
+  renderedTree?: RenderedNode[];
+  measure?: { path: JxPath; rect: SerializableRect }[];
+}
+
+function buildMockPerception(opts: MockPerceptionOptions): PerceptionCapability {
+  return {
+    getSelection: () => opts.selection ?? null,
+    getRenderedTree: async () => opts.renderedTree ?? [],
+    measure: async (paths) => {
+      const all = opts.measure ?? [];
+      return all.filter((m) => paths.some((p) => JSON.stringify(p) === JSON.stringify(m.path)));
+    },
+  };
+}
 
 /**
  * Build the headless `AssistantHost`: `document` delegates to the same `transactDoc()`-wrapped
@@ -54,11 +81,12 @@ const DEFAULT_MODEL = "gpt-5.4";
  * `files.saveFile` is wired to the harness's write sink when provided. `files.openDocument`
  * degrades explicitly — the headless harness has exactly one working document and never switches
  * it, matching today's behavior where `openDocument` was never injected into `registerAiTools` here
- * (the tool reported unavailable).
+ * (the tool reported unavailable). `perception`, when passed, wires the mock L6 capability.
  */
 function buildHeadlessHost(
   tab: Tab,
   saveFile?: ((relPath: string, content: string) => Promise<void>) | undefined,
+  perception?: MockPerceptionOptions | undefined,
 ): AssistantHost {
   const document: AssistantHost["document"] = {
     beginBatch: () => beginBatch(tab),
@@ -96,8 +124,10 @@ function buildHeadlessHost(
       transactDoc(tab, (t) => mutateUpdateStyle(t, path, property, value)),
   };
 
+  const perceptionCapability = perception ? { perception: buildMockPerception(perception) } : {};
+
   if (!saveFile) {
-    return { document };
+    return { document, ...perceptionCapability };
   }
 
   return {
@@ -108,6 +138,7 @@ function buildHeadlessHost(
       },
       saveFile,
     },
+    ...perceptionCapability,
   };
 }
 
@@ -122,6 +153,8 @@ function buildHeadlessHost(
  * @param {(relPath: string, content: string) => Promise<void>} [opts.saveFile] -
  *   Create_component/create_page sink.
  * @param {string} [opts.model] - Override JX_AI_MODEL.
+ * @param {MockPerceptionOptions} [opts.perception] - Mock canvas-perception fixture (§12.6 L6
+ *   layer): preset selection/rendered-tree/measure. Omit to run without the capability (default).
  */
 export function buildRealHarness({
   document,
@@ -130,6 +163,7 @@ export function buildRealHarness({
   projectRoot,
   saveFile,
   model = process.env.JX_AI_MODEL || DEFAULT_MODEL,
+  perception,
 }: {
   document: Record<string, unknown>;
   projectConfig?: Record<string, unknown>;
@@ -137,6 +171,7 @@ export function buildRealHarness({
   projectRoot?: string;
   saveFile?: ((relPath: string, content: string) => Promise<void>) | undefined;
   model?: string;
+  perception?: MockPerceptionOptions | undefined;
 }) {
   // Reuse the repo's existing OPENAI_* convention (packages/server/src/ai-api.js) so one .env key
   // Serves both the server and the harness; JX_AI_* overrides when you want a harness-only target.
@@ -152,7 +187,7 @@ export function buildRealHarness({
   const chatState = createChatState({ model });
 
   const toolRegistry = createToolRegistry() as ToolRegistry;
-  const host = buildHeadlessHost(tab, saveFile);
+  const host = buildHeadlessHost(tab, saveFile, perception);
   // Default `validate` (validateDoc) is the real schema check, so the loop self-corrects just like
   // Production — registerAiTools falls back to it whenever host.validation is absent.
   registerAiTools(toolRegistry, host);
@@ -172,6 +207,11 @@ export function buildRealHarness({
     projectConfig: projectConfig as ProjectConfig | undefined,
     components: components as ComponentEntry[] | undefined,
     projectRoot,
+    capabilities: {
+      files: Boolean(host.files),
+      renderCheck: Boolean(host.renderCheck),
+      perception: Boolean(host.perception),
+    },
   });
 
   return {

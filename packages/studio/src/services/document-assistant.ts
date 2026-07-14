@@ -24,6 +24,7 @@ import { activeTab, workspace } from "../workspace/workspace";
 import { toRaw } from "../reactivity";
 import { componentRegistry } from "../files/components";
 import { getNodeAtPath } from "../state";
+import { createPerceptionHost } from "../canvas/perception-host";
 import {
   beginBatch,
   endBatch,
@@ -170,6 +171,7 @@ function buildStudioHost(): AssistantHost {
         await plat.writeFile(relPath, content);
       },
     },
+    perception: createPerceptionHost(getTab),
     project,
     renderCheck: renderCheck as (
       doc: unknown,
@@ -203,15 +205,45 @@ export function createDocumentAssistant() {
   /** The persisted session backing the live chat; null = fresh unsaved chat. */
   let sessionId: string | null = null;
 
+  /**
+   * Ephemeral automatic-selection context (§12.5): if a node is currently selected, append a short
+   * addendum describing it. Folded into the SYSTEM PROMPT — recomputed fresh on every
+   * `buildPrompt()` call (already true for the rest of the prompt) rather than embedded into the
+   * persisted user message the way the manual attach-context chip is (`attached-context.ts`) — so a
+   * reloaded session reflects the CURRENT selection, never a stale one baked into history. Resolves
+   * the plan's §12.5 open question in favor of ephemeral-and-recomputed over
+   * embedded-and-persisted.
+   */
+  function selectionContextAddendum(doc: JxMutableNode | undefined): string {
+    const path = host.perception?.getSelection();
+    if (!path || !doc) {
+      return "";
+    }
+    const node = getNodeAtPath(doc, path) as (JxMutableNode & { textContent?: string }) | undefined;
+    const tag = node?.tagName || "element";
+    const text = typeof node?.textContent === "string" ? node.textContent.slice(0, 40) : "";
+    return (
+      `\n\n---\n\nCurrent selection (ephemeral — reflects the live canvas, not part of persisted ` +
+      `history): the user has <${tag}> selected at path ${JSON.stringify(path)}${text ? ` ("${text}")` : ""}. ` +
+      `If their request is ambiguous about WHICH element they mean ("this", "it", "the button"), prefer this node.`
+    );
+  }
+
   function buildPrompt() {
     const tab = activeTab.value;
-    return buildSystemPrompt({
-      capabilities: { files: Boolean(host.files), renderCheck: Boolean(host.renderCheck) },
+    const doc = tab ? (toRaw(tab.doc.document) as JxMutableNode) : undefined;
+    const base = buildSystemPrompt({
+      capabilities: {
+        files: Boolean(host.files),
+        perception: Boolean(host.perception),
+        renderCheck: Boolean(host.renderCheck),
+      },
       components: componentRegistry.length > 0 ? componentRegistry : undefined,
-      document: tab ? (toRaw(tab.doc.document) as JxMutableNode) : undefined,
+      document: doc,
       projectConfig: (workspace.projectConfig as ProjectConfig | null) || undefined,
       projectRoot: workspace.projectRoot || undefined,
     });
+    return base + selectionContextAddendum(doc);
   }
 
   async function sendMessage(text: string) {

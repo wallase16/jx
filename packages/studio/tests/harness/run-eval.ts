@@ -19,8 +19,9 @@ import type { StreamingClient } from "@jxsuite/ai/streaming-client";
 
 import { loadFixture } from "./load-fixture.js";
 import { buildRealHarness, runPrompt } from "./real-llm.js";
+import type { MockPerceptionOptions } from "./real-llm.js";
 import { scoreRun } from "./score.js";
-import { textOf, anyStyle, anyNode } from "./doc-query.js";
+import { textOf, anyStyle, anyNode, nodeAt, allNodes } from "./doc-query.js";
 import { validateDoc } from "@jxsuite/assistant/validate";
 
 /** Context handed to a test's `check`: the model's file writes plus a reader for them. */
@@ -111,6 +112,10 @@ interface EvalTest {
   prompt: string;
   check: (doc: any, ctx: EvalCtx) => boolean | number | Promise<boolean | number>;
   mustReadFirst?: boolean;
+  /** Fixture page to load instead of the default `pages/index.json` (relative to the site). */
+  fixturePage?: string;
+  /** Mock `PerceptionCapability` fixture for the L6 layer (§12.6) — omit to run without it. */
+  perception?: MockPerceptionOptions;
 }
 
 const TESTS: EvalTest[] = [
@@ -290,6 +295,60 @@ const TESTS: EvalTest[] = [
     prompt: "Create a tab switcher component with 3 tabs that show different content",
     check: (d, ctx) => inAnyDoc(d, ctx, (c) => hasState(c) && hasMarker(c, "$switch")),
   },
+
+  // ── Layer 6: canvas perception (§12.6) — mock PerceptionCapability with a preset
+  // Selection/rendered-tree fixture (real-llm.ts buildMockPerception). Selection-targeting: the
+  // Mutation must land at the SELECTED path, not a lookalike sibling. Component-detection: given
+  // Describe_canvas naming an existing custom element, the model reuses that tag instead of
+  // Re-authoring equivalent markup inline. ──
+  {
+    id: "L6.1",
+    prompt: "Make this button bigger.",
+    fixturePage: "pages/l6-selection.json",
+    perception: { selection: ["children", 1] },
+    check: (d) => {
+      const grew = (n: any) =>
+        Boolean(
+          n?.style &&
+          (n.style.fontSize ||
+            n.style.padding ||
+            n.style.width ||
+            n.style.minWidth ||
+            n.style.height),
+        );
+      // The selected node ("Cancel", index 1) must grow; its lookalike sibling ("Save", index 0)
+      // Must not — proving the edit targeted the SELECTION, not just the first/any matching button.
+      return grew(nodeAt(d, ["children", 1])) && !grew(nodeAt(d, ["children", 0]));
+    },
+  },
+  {
+    id: "L6.2",
+    prompt:
+      "Check what's actually on the canvas right now, then add the same navigation bar to the bottom of the page too.",
+    fixturePage: "pages/l6-component.json",
+    perception: {
+      renderedTree: [
+        { childCount: 2, path: [], rect: { height: 600, width: 800, x: 0, y: 0 }, tagName: "div" },
+        {
+          childCount: 0,
+          path: ["children", 0],
+          rect: { height: 60, width: 800, x: 0, y: 0 },
+          tagName: "nav-bar",
+        },
+        {
+          childCount: 0,
+          path: ["children", 1],
+          rect: { height: 40, width: 800, x: 0, y: 60 },
+          tagName: "h1",
+          textSnippet: "Welcome",
+        },
+      ],
+    },
+    // The page already has ONE nav-bar; reusing the component (not re-authoring an inline <nav>)
+    // Yields a SECOND nav-bar-tagged node on the page.
+    check: (d) =>
+      allNodes(d).filter((n: any) => String(n.tagName).toLowerCase() === "nav-bar").length >= 2,
+  },
 ];
 
 /** One rubric axis result, as produced by `scoreRun`. */
@@ -327,8 +386,8 @@ function countingClient(client: StreamingClient): CountingClient {
 
 /** Run a single test once on a fresh harness; returns the scored result. */
 async function runOnce(test: EvalTest): Promise<RunResult> {
-  const fx = loadFixture();
-  const harness = buildRealHarness(fx);
+  const fx = loadFixture(test.fixturePage ? { page: test.fixturePage } : undefined);
+  const harness = buildRealHarness({ ...fx, perception: test.perception });
   const counter = countingClient(harness.client);
   harness.client = counter;
   try {

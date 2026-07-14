@@ -141,7 +141,7 @@ interface BuildSystemPromptOptions {
    * terse "Environment Capabilities" section so the model rarely calls a tool it can't use (§11.3).
    * Omit entirely to omit the section (e.g. when the caller doesn't yet know its host's shape).
    */
-  capabilities?: { files?: boolean; renderCheck?: boolean } | undefined;
+  capabilities?: { files?: boolean; renderCheck?: boolean; perception?: boolean } | undefined;
 }
 
 // ─── Jx Schema Reference (condensed) ────────────────────────────────────────
@@ -496,8 +496,8 @@ When asked to build a site with multiple pages:
  * @param {object} [opts.projectConfig] - The project.json config if available
  * @param {ComponentEntry[]} [opts.components] - Available components
  * @param {string} [opts.projectRoot] - Project root path
- * @param {{ files?: boolean; renderCheck?: boolean }} [opts.capabilities] - Which optional
- *   AssistantHost capabilities are present in this environment
+ * @param {{ files?: boolean; renderCheck?: boolean; perception?: boolean }} [opts.capabilities] -
+ *   Which optional AssistantHost capabilities are present in this environment
  * @returns {string}
  */
 export function buildSystemPrompt({
@@ -524,6 +524,9 @@ You have access to these tools that read and modify the live Jx document directl
 - create_component(path, content) — create a new .json component file on disk.
 - create_page(path, content) — create a new .json page file on disk.
 - open_document(path) — switch the active document to another file. After opening, all tools operate on the new document. Use this after create_page/create_component to iteratively refine the new file.
+- get_selection() — get the node currently selected in the canvas, if any. Use this before an ambiguous request ("make this bigger", "change its color") to find out which node the user means.
+- describe_canvas(root?) — get what's actually rendered on the canvas right now (tag, rect, text, visibility per node), as ground truth against the document tree, and to spot existing components you can reuse.
+- measure_nodes(paths) — get the current on-screen rect of one or more nodes, for size/layout-aware edits.
 
 When the user asks you to build or modify something:
 1. Call read_document first if needed to discover the current structure and valid paths.
@@ -573,6 +576,7 @@ Be concise. Don't explain what Jx is unless asked. Just build.`,
     const lines = [
       `- File operations (create_component, create_page, open_document): ${capabilities.files ? "available" : "not available in this environment"}.`,
       `- Render checking (extra validation pass after an edit): ${capabilities.renderCheck ? "available" : "not available in this environment"}.`,
+      `- Canvas perception (get_selection, describe_canvas, measure_nodes): ${capabilities.perception ? "available" : "not available in this environment"}.`,
     ];
     sections.push(`## Environment Capabilities\n\n${lines.join("\n")}`);
   }

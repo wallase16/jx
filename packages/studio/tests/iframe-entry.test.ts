@@ -210,6 +210,121 @@ describe("startCanvasIframe", () => {
     expect((geo as { hits: { path: unknown }[] }).hits[0]!.path).toEqual(["children", 0]);
   });
 
+  test("answers an enumerate request with the rendered tree (§12.3)", async () => {
+    const pair = fakeChannelPair<ParentToIframe, IframeToParent>();
+    const fromIframe: IframeToParent[] = [];
+    pair.parent.onMessage((m) => fromIframe.push(m));
+    const container = document.createElement("div");
+    document.body.append(container);
+    teardown = startCanvasIframe({ channel: pair.iframe, container });
+
+    pair.parent.post(
+      renderMsg(1, { children: [{ children: ["Hi"], tagName: "h1" }], tagName: "div" }),
+    );
+    pair.flush();
+    await flush();
+
+    pair.parent.post({ kind: "enumerate", reqId: 7 });
+    pair.flush();
+    pair.flush();
+
+    const tree = fromIframe.find((m) => m.kind === "renderedTree");
+    expect(tree).toMatchObject({ kind: "renderedTree", reqId: 7 });
+    const { nodes } = tree as { nodes: { path: unknown; tagName: string; childCount: number }[] };
+    expect(nodes).toHaveLength(2);
+    const root = nodes.find((n) => n.tagName === "div")!;
+    const h1 = nodes.find((n) => n.tagName === "h1")!;
+    expect(root.path).toEqual([]);
+    expect(root.childCount).toBe(1);
+    expect(h1.path).toEqual(["children", 0]);
+    expect(h1.childCount).toBe(0);
+    expect((h1 as { textSnippet?: string }).textSnippet).toBe("Hi");
+  });
+
+  test("scopes an enumerate request to a root path, including the root itself", async () => {
+    const pair = fakeChannelPair<ParentToIframe, IframeToParent>();
+    const fromIframe: IframeToParent[] = [];
+    pair.parent.onMessage((m) => fromIframe.push(m));
+    const container = document.createElement("div");
+    document.body.append(container);
+    teardown = startCanvasIframe({ channel: pair.iframe, container });
+
+    pair.parent.post(
+      renderMsg(1, { children: [{ children: ["Hi"], tagName: "h1" }], tagName: "div" }),
+    );
+    pair.flush();
+    await flush();
+
+    pair.parent.post({ kind: "enumerate", reqId: 8, root: ["children", 0] });
+    pair.flush();
+    pair.flush();
+
+    const tree = fromIframe.find((m) => m.kind === "renderedTree");
+    const { nodes } = tree as { nodes: { path: unknown; tagName: string }[] };
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]!.tagName).toBe("h1");
+  });
+
+  test("an enumerate scoped to an unresolvable root falls back to the whole document", async () => {
+    const pair = fakeChannelPair<ParentToIframe, IframeToParent>();
+    const fromIframe: IframeToParent[] = [];
+    pair.parent.onMessage((m) => fromIframe.push(m));
+    const container = document.createElement("div");
+    document.body.append(container);
+    teardown = startCanvasIframe({ channel: pair.iframe, container });
+
+    pair.parent.post(renderMsg(1, { tagName: "div", children: [] }));
+    pair.flush();
+    await flush();
+
+    pair.parent.post({ kind: "enumerate", reqId: 9, root: ["children", 99] });
+    pair.flush();
+    pair.flush();
+
+    const tree = fromIframe.find((m) => m.kind === "renderedTree");
+    expect(tree).toMatchObject({ kind: "renderedTree", reqId: 9 });
+  });
+
+  test("applies and expires a transient highlight on the given paths", async () => {
+    const pair = fakeChannelPair<ParentToIframe, IframeToParent>();
+    const container = document.createElement("div");
+    document.body.append(container);
+    teardown = startCanvasIframe({ channel: pair.iframe, container });
+
+    pair.parent.post(
+      renderMsg(1, { children: [{ children: ["Hi"], tagName: "h1" }], tagName: "div" }),
+    );
+    pair.flush();
+    await flush();
+
+    pair.parent.post({ kind: "highlight", paths: [["children", 0]], ttl: 10 });
+    pair.flush();
+
+    const h1 = container.querySelector("h1")!;
+    expect(h1.style.outline).toContain("3b82f6");
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+    expect(h1.style.outline).toBe("");
+  });
+
+  test("a highlight on a path with no matching element is a no-op", async () => {
+    const pair = fakeChannelPair<ParentToIframe, IframeToParent>();
+    const container = document.createElement("div");
+    document.body.append(container);
+    teardown = startCanvasIframe({ channel: pair.iframe, container });
+
+    pair.parent.post(renderMsg(1, { tagName: "div", children: [] }));
+    pair.flush();
+    await flush();
+
+    expect(() => {
+      pair.parent.post({ kind: "highlight", paths: [["children", 99]], ttl: 10 });
+      pair.flush();
+    }).not.toThrow();
+  });
+
   test("bootCanvasIframe wires a channel from the window and announces ready", () => {
     const posted: unknown[] = [];
     const win = {

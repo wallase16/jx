@@ -86,6 +86,7 @@ describe("geometry funnel invariant (regression guard)", () => {
       "canvas/iframe-keys.ts",
       "canvas/iframe-overlay.ts",
       "canvas/iframe-drop.ts",
+      "canvas/iframe-perception.ts",
       "utils/insertion-helper.ts",
       "utils/geometry.ts",
     ]);

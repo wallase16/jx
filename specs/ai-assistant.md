@@ -3,8 +3,9 @@
 ## LLM-Powered Chat Builder for Jx Documents
 
 **Version:** 2.0.0-draft
-**Status:** Describes the implementation on `upstream/main` as of this branch, plus the
-target architecture for Phases 2–4 (not yet built — see §14).
+**Status:** Describes the implementation on `upstream/main` as of this branch. Phases 0–3
+(spec, eval hardening, seam extraction, perception) are shipped; Phase 4 (extensibility) and
+Phase 5 (optional server-side API) remain proposals — see §14.
 **License:** MIT
 
 > This is the Phase 0 deliverable of `docs/assistant-sdk-perception-plan.md`: a port +
@@ -12,13 +13,12 @@ target architecture for Phases 2–4 (not yet built — see §14).
 > branch, brought current against the TS port that actually shipped and extended with the
 > `AssistantHost` seam and canvas-perception architecture the plan calls for.
 >
-> **Read the status of each part correctly:** §§1–10 describe the **shipped** system, and every
-> interface there is checked against the cited source file. §§11–13 (the `AssistantHost` seam,
-> `PerceptionCapability`, the SDK/API decision) are the **design of record for Phases 2–4 —
-> proposals, not yet built.** Their interface sketches are _derived from_ the real injection
-> sites they replace, but the exact shapes are settled during implementation, not here; §11.3
-> and §12 call out the specific open questions. File references throughout make drift easy to
-> catch on the next revision.
+> **Read the status of each part correctly:** §§1–12 describe the **shipped** system (§11's
+> `AssistantHost` seam and §12's `PerceptionCapability` landed in Phases 2–3), and every
+> interface there is checked against the cited source file — §12.7 notes where the shipped code
+> deviated from its original sketch. §13 (the SDK vs API decision) remains **design of record for
+> Phase 4/5 — a decision, not yet built beyond what §11/§12 already ship.** File references
+> throughout make drift easy to catch on the next revision.
 
 ---
 
@@ -736,9 +736,10 @@ boundary" argument for why Phase 2 is a pure refactor, not new design.
 
 ## 12. Perception (Canvas Awareness)
 
-**Not yet built** — this section specifies the Phase 3 target (`docs/assistant-sdk-perception-
-plan.md`), the launch milestone: today the assistant edits the document tree blind to what's
-actually selected or rendered on canvas, beyond the manual "attach context" chip (§3.3).
+**Done** — shipped in Phase 3 (`docs/assistant-sdk-perception-plan.md`), the launch milestone: the
+assistant is no longer blind to what's actually selected or rendered on canvas. The subsections
+below are kept as the as-built reference; §12.7 notes where the shipped code deviated from this
+section's original sketch.
 
 ### 12.1 What Exists Today to Build On
 
@@ -813,32 +814,65 @@ is absent (headless hosts, or a canvas mode that doesn't support it):
 ### 12.5 Automatic Selection Context + Post-Tool Highlight
 
 - **On send:** if `host.perception.getSelection()` returns a path, `document-assistant.ts`
-  (or its Phase-2 successor) prepends an ephemeral context block to the outgoing user turn —
-  the automatic generalization of today's manual attach-context chip (§3.3); the chip stays as
-  the user's opt-out (attach something _other_ than the live selection, or suppress it).
-  **Open question:** today's chip embeds context into _persisted_ message content (§3.3), while
-  automatic selection context is described here as _ephemeral_ (recomputed each send, not stored)
-  so a reloaded session isn't pinned to a stale selection. Phase 3 must pick one — embedded-and-
-  persisted (chip parity) vs. ephemeral-and-recomputed — since they replay differently when a
-  saved conversation is reopened.
-- **Post-tool highlight:** the agent loop (`agent-loop.ts`) collects the set of paths touched
-  by the round's tool calls and, after `endBatch()`, calls
-  `host.perception?.highlight(paths)` so the user sees exactly what the model changed on the
-  live canvas, not just in the chat transcript.
+  appends an ephemeral context addendum. **Open question resolved:** ephemeral-and-recomputed
+  won over embedded-and-persisted (chip parity) — the addendum is folded into the SYSTEM PROMPT
+  (`buildPrompt()`'s `selectionContextAddendum()`), recomputed fresh on every send exactly like
+  the rest of the prompt, rather than mutated into the persisted user message the way the manual
+  attach-context chip is (`attached-context.ts`). Rationale: `chatState.sendMessage(text)`
+  persists whatever it's given, and mutating it post-hoc to keep the addendum out of history would
+  mean fragile, racy surgery on stored message content; folding into the system prompt achieves
+  the same "model sees current selection" effect without ever touching persisted history, so a
+  reloaded session is never pinned to a stale selection. The manual chip is untouched and remains
+  the opt-out/override.
+- **Post-tool highlight:** `agent-loop.ts` collects the set of paths touched by the round's tool
+  calls (`touchedPathsFor()`, matched by tool name against its own args — `set_property`/
+  `set_style`/`set_text`'s `path`; `add_child`'s `[...parentPath, "children", index]`;
+  `move_node`'s destination; `remove_node`'s parent, since the removed node itself is gone)
+  across the WHOLE turn (not per round), and after `endBatch()` calls
+  `host.perception?.highlight?.(paths)` once with the full set.
 
 ### 12.6 New Eval Layer
 
-A new L6 layer in the eval suite (§11.4), gated on a mock `PerceptionCapability` with a preset
-selection:
+A new L6 layer in the eval suite (§11.4), gated on a mock `PerceptionCapability`
+(`real-llm.ts`'s `buildMockPerception`, wired via `buildRealHarness({ perception })`):
 
-- Selection-targeting assertions — "make THIS button larger" must land the mutation at the
-  selected path, not a lookalike elsewhere in the tree.
-- Component-detection assertions — given `describe_canvas` output naming an existing
-  component, the model reuses that tag instead of re-authoring equivalent markup inline.
+- **L6.1 selection-targeting** (`sites/test-blank/pages/l6-selection.json` — two lookalike
+  buttons): "Make this button bigger" with a preset selection on the second button; the check
+  asserts the SELECTED node gained a size style and its sibling did not — proving the edit
+  targeted the selection, not just any/the-first matching element.
+- **L6.2 component-detection** (`sites/test-blank/pages/l6-component.json` — a page with one
+  `nav-bar` instance already placed): a preset mock rendered-tree names the existing `nav-bar`;
+  the check asserts a SECOND `nav-bar`-tagged node exists afterward — the model reused the
+  component tag via `add_child` rather than hand-authoring equivalent `<nav>` markup inline.
 
-Rendered-DOM and highlight-timing axes stay in the chrome-devtools **browser** eval, same as
-today's rendered-DOM/Undo-Redo split (§11.4) — headless can mock the capability's shape but not
-verify the iframe actually painted the highlight.
+Both pass at worst-of-3 (`bun run eval:headless`), alongside the original 18 + L4.6 (21/21 total,
+zero regression). Rendered-DOM and highlight-timing axes stay in the chrome-devtools **browser**
+eval, same as today's rendered-DOM/Undo-Redo split (§11.4) — headless can mock the capability's
+shape but not verify the iframe actually painted the highlight.
+
+### 12.7 Implementation Notes (deviations from the original sketch)
+
+- **`SerializableRect`/`RenderedNode` are defined independently in `@jxsuite/assistant/host.ts`**,
+  not imported from studio's `iframe-protocol.ts` — the same "small deliberate duplication" the
+  package already accepted for `VOID_ELEMENTS`/`flattenTree` (§11.2), since the assistant core must
+  never import canvas/studio modules. The studio types are structurally identical; `perception-
+host.ts` passes them through with no explicit conversion.
+- **`measure`/`getRenderedTree` are promise-based** (`perception-host.ts`), layered over the
+  existing fire-and-forget `measure`→`geometry` round trip and the new `enumerate`→`renderedTree`
+  one: a per-call negative `reqId` (disjoint from `iframe-host.ts`'s own positive `selReqId`/
+  `presenceReqId`/`panReqId` counter) is matched against replies via a one-shot `channel.onMessage`
+  listener, with a 2s timeout resolving empty if the iframe never answers.
+  `postDragMessage`/`hostForCanvas` (generic despite their drag-session names) are reused as the
+  send/lookup primitives rather than adding new ones.
+  `getActivePanel()` (`canvas-helpers.ts`) resolves which mounted canvas panel backs the
+  currently-active tab.
+- **`describe_canvas`'s rendered-tree walk counts STAMPED descendants for `childCount`**, not raw
+  DOM children — a text-wrapper span between two `data-jx-path` elements doesn't inflate the count.
+  A scoped `enumerate({ root })` includes the root element itself (not just its descendants),
+  else `describe_canvas({ root })` would omit the very node the caller asked about.
+- **`highlight` applies an inline `outline` style** (saved/restored per element, TTL via
+  `setTimeout`), not an injected CSS class — the iframe renders arbitrary project content with its
+  own stylesheet, so there's no reliable class name to hang a rule off without risking a collision.
 
 ---
 
@@ -890,12 +924,13 @@ is architecturally legal today even though extensions v2 currently has zero AI e
   with a new deterministic injected-fault test. Gate met: 19/19 headless (worst-of-3, the 18
   original tests + the new fault test). Full turnover: `docs/ai-assistant-headless-harness.md`
   §6.
-- **Phase 2 — Seam extraction (next).** Create `packages/assistant`, move the modules per §11.2,
-  convert studio + the eval harness to `AssistantHost` implementations. Pure refactor — eval
-  parity is the gate, not new capability.
-- **Phase 3 — Perception (launch milestone).** §12 in full: protocol messages,
-  `perception-host.ts`, the three new tools, automatic selection context, highlight feedback,
-  the L6 eval layer.
+- **Phase 2 — Seam extraction: done.** Created `packages/assistant`, moved the modules per §11.2,
+  converted studio + the eval harness to `AssistantHost` implementations. Pure refactor — eval
+  parity was the gate, not new capability. Gate met: 19/19 headless (worst-of-3), exact parity.
+- **Phase 3 — Perception (launch milestone): done.** §12 in full: protocol messages,
+  `perception-host.ts`, the three new tools, automatic selection context (ephemeral, folded into
+  the system prompt), post-tool highlight feedback, the L6 eval layer. Gate met: 21/21 headless
+  (worst-of-3, the original 18 + L4.6 + new L6.1/L6.2), zero regression.
 - **Phase 4 — Extensibility.** Publish `@jxsuite/assistant`; a CLI reference `AssistantHost`;
   the extensions `assistant` admission block (§13).
 - **Phase 5 (optional) — Server-side document-session API.** §13.

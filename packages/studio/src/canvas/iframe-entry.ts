@@ -8,6 +8,7 @@
 import { postMessageChannel } from "./iframe-channel";
 import { installCanvasImageRetry, renderResolvedDocument } from "./iframe-render";
 import { measureHits, startInteraction } from "./iframe-interaction";
+import { applyHighlight, enumerateRenderedTree, resolveScopeRoot } from "./iframe-perception";
 import {
   AUTO_SCROLL_STEP,
   clearIframeDrag,
@@ -363,6 +364,21 @@ export function startCanvasIframe(opts: {
         kind: "geometry",
         reqId: msg.reqId,
       });
+      return;
+    }
+    if (msg.kind === "enumerate") {
+      channel.post({
+        kind: "renderedTree",
+        nodes: enumerateRenderedTree(
+          container.ownerDocument,
+          resolveScopeRoot(container.ownerDocument, msg.root),
+        ),
+        reqId: msg.reqId,
+      });
+      return;
+    }
+    if (msg.kind === "highlight") {
+      applyHighlight(container.ownerDocument, msg.paths, msg.ttl);
       return;
     }
     if (msg.kind === "patch") {

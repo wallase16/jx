@@ -9,7 +9,12 @@
  * history stack.
  */
 
-import type { AssistantHost, AssistantHostDocument } from "../src/host";
+import type {
+  AssistantHost,
+  AssistantHostDocument,
+  RenderedNode,
+  SerializableRect,
+} from "../src/host";
 import type { JxMutableNode, JxPath } from "@jxsuite/schema/types";
 
 function getNodeAtPath(doc: JxMutableNode, path: JxPath): any {
@@ -37,6 +42,14 @@ function childArray(node: any): unknown[] {
   return node.children;
 }
 
+export interface FakePerceptionOptions {
+  selection?: JxPath | null;
+  renderedTree?: RenderedNode[];
+  measure?: { path: JxPath; rect: SerializableRect }[];
+  /** No-highlight capability (perception present but `highlight` omitted) — pass `null`. */
+  highlight?: ((paths: JxPath[], opts?: { ttl?: number }) => void) | null;
+}
+
 export interface FakeHostOptions {
   validate?: (doc: unknown) => Promise<string[]>;
   saveFile?: (relPath: string, content: string) => Promise<void>;
@@ -45,6 +58,7 @@ export interface FakeHostOptions {
   projectStyle?: Record<string, string>;
   /** Start with no active document (getDocument() returns null) — for "no document open" cases. */
   noDocument?: boolean;
+  perception?: FakePerceptionOptions;
 }
 
 export interface FakeHostHandle {
@@ -53,6 +67,8 @@ export interface FakeHostHandle {
   setDoc: (doc: JxMutableNode | null) => void;
   /** How many times beginBatch/endBatch were called, and whether a batch is open right now. */
   batch: { begins: number; ends: number; isOpen: () => boolean };
+  /** Paths passed to `perception.highlight()`, one entry per call, in call order. */
+  highlightCalls: JxPath[][];
 }
 
 /** Build a fresh fake host wrapping a deep clone of `document`. */
@@ -65,6 +81,7 @@ export function createFakeHost(
     : (structuredClone(document) as JxMutableNode);
   let batching = false;
   const batch = { begins: 0, ends: 0, isOpen: () => batching };
+  const highlightCalls: JxPath[][] = [];
 
   const docCapability: AssistantHostDocument = {
     getDocument: () => doc,
@@ -162,6 +179,28 @@ export function createFakeHost(
       : {}),
     ...(opts.projectStyle ? { project: { projectStyle: opts.projectStyle } } : {}),
     ...(opts.renderCheck ? { renderCheck: opts.renderCheck } : {}),
+    ...(opts.perception
+      ? {
+          perception: {
+            getSelection: () => opts.perception!.selection ?? null,
+            getRenderedTree: async () => opts.perception!.renderedTree ?? [],
+            measure: async (paths: JxPath[]) => {
+              const all = opts.perception!.measure ?? [];
+              return all.filter((m) =>
+                paths.some((p) => JSON.stringify(p) === JSON.stringify(m.path)),
+              );
+            },
+            ...(opts.perception.highlight === null
+              ? {}
+              : {
+                  highlight: (paths: JxPath[], hOpts?: { ttl?: number }) => {
+                    highlightCalls.push(paths);
+                    opts.perception!.highlight?.(paths, hOpts);
+                  },
+                }),
+          },
+        }
+      : {}),
   };
 
   return {
@@ -171,5 +210,6 @@ export function createFakeHost(
       doc = next;
     },
     batch,
+    highlightCalls,
   };
 }

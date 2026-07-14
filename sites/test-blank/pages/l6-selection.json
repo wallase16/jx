@@ -1,0 +1,8 @@
+{
+  "tagName": "div",
+  "attributes": { "id": "l6-selection-page" },
+  "children": [
+    { "tagName": "button", "textContent": "Save" },
+    { "tagName": "button", "textContent": "Cancel" }
+  ]
+}

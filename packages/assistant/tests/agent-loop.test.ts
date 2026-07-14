@@ -6,6 +6,7 @@ import type { JxMutableNode } from "@jxsuite/schema/types";
 import { registerAiTools } from "../src/tools";
 import { runAgentLoop } from "../src/agent-loop";
 import { createFakeHost } from "./fake-host";
+import type { FakeHostOptions } from "./fake-host";
 
 /** The normalized stream event the StreamingClient emits (not exported, so derived here). */
 type StreamEvent =
@@ -44,12 +45,23 @@ const DEFAULT_DOC = { tagName: "div", children: [{ tagName: "p", textContent: "H
 function harness(
   doc: Record<string, unknown> = DEFAULT_DOC,
   validate?: (doc: unknown) => Promise<string[]>,
+  opts: Omit<FakeHostOptions, "validate"> = {},
 ) {
-  const { host, getDoc, batch } = createFakeHost(doc, { validate: validate ?? (async () => []) });
+  const { host, getDoc, batch, highlightCalls } = createFakeHost(doc, {
+    validate: validate ?? (async () => []),
+    ...opts,
+  });
   const chatState = createChatState({ model: "test" });
   const toolRegistry = createToolRegistry();
   registerAiTools(toolRegistry, host);
-  return { chatState, toolRegistry: toolRegistry as ToolRegistry, host, getDoc, batch };
+  return {
+    chatState,
+    toolRegistry: toolRegistry as ToolRegistry,
+    host,
+    getDoc,
+    batch,
+    highlightCalls,
+  };
 }
 
 describe("agent loop — integration", () => {
@@ -218,5 +230,166 @@ describe("agent loop — integration", () => {
     const toolMsg = chatState.messages.find((m) => m.role === "tool");
     expect(toolMsg!.content).toContain("Failed to parse arguments");
     expect(chatState.status).toBe("idle");
+  });
+});
+
+describe("agent loop — post-tool highlight (§12.5)", () => {
+  test("highlights every path touched across the whole turn, once, after the batch closes", async () => {
+    const { chatState, toolRegistry, host, highlightCalls } = harness(undefined, undefined, {
+      perception: { selection: null },
+    });
+    const client = fakeClient([
+      toolCallRound("c1", "add_child", {
+        parentPath: [],
+        index: 1,
+        node: { tagName: "span", textContent: "added" },
+      }),
+      toolCallRound("c2", "set_style", { path: ["children", 0], property: "color", value: "red" }),
+      [{ type: "done", stopReason: "stop" }],
+    ]);
+
+    chatState.sendMessage("add a span, then style the paragraph");
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
+
+    expect(highlightCalls).toHaveLength(1);
+    expect(highlightCalls[0]).toContainEqual(["children", 1]);
+    expect(highlightCalls[0]).toContainEqual(["children", 0]);
+  });
+
+  test("does not call highlight when no tool call touched a path", async () => {
+    const { chatState, toolRegistry, host, highlightCalls } = harness(undefined, undefined, {
+      perception: { selection: null },
+    });
+    const client = fakeClient([toolCallRound("c1", "get_selection", {})]);
+
+    chatState.sendMessage("what's selected?");
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
+
+    expect(highlightCalls).toHaveLength(0);
+  });
+
+  test("tolerates a perception capability with no highlight method", async () => {
+    const { chatState, toolRegistry, host } = harness(undefined, undefined, {
+      perception: { selection: null, highlight: null },
+    });
+    const client = fakeClient([
+      toolCallRound("c1", "set_property", { path: [], key: "id", value: "x" }),
+    ]);
+
+    chatState.sendMessage("set id");
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
+    expect(chatState.status).toBe("idle");
+  });
+
+  test("never calls highlight when perception is absent", async () => {
+    const { chatState, toolRegistry, host } = harness();
+    const client = fakeClient([
+      toolCallRound("c1", "set_property", { path: [], key: "id", value: "x" }),
+    ]);
+
+    chatState.sendMessage("set id");
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
+    expect(chatState.status).toBe("idle");
+  });
+
+  test("highlights move_node's destination path", async () => {
+    const { toolRegistry, host, highlightCalls, chatState } = harness(
+      {
+        tagName: "div",
+        children: [
+          { tagName: "section", children: [{ tagName: "p", textContent: "move me" }] },
+          { tagName: "aside", children: [] },
+        ],
+      },
+      undefined,
+      { perception: { selection: null } },
+    );
+    const client = fakeClient([
+      toolCallRound("c1", "move_node", {
+        fromPath: ["children", 0, "children", 0],
+        toParentPath: ["children", 1],
+        toIndex: 0,
+      }),
+    ]);
+
+    chatState.sendMessage("move it");
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
+
+    expect(highlightCalls).toHaveLength(1);
+    expect(highlightCalls[0]).toContainEqual(["children", 1, "children", 0]);
+  });
+
+  test("collects no path for add_child/move_node calls with a malformed args shape", async () => {
+    const { toolRegistry, host, highlightCalls, chatState } = harness(undefined, undefined, {
+      perception: { selection: null },
+    });
+    // Add_child without a parentPath array, move_node without a toIndex number — both tool calls
+    // Still fail validation inside the tool itself, but touchedPathsFor must not throw either way.
+    const client = fakeClient([
+      toolCallRound("c1", "add_child", { index: 0, node: { tagName: "p" } }),
+      toolCallRound("c2", "move_node", { fromPath: ["children", 0], toParentPath: [] }),
+    ]);
+
+    chatState.sendMessage("malformed calls");
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
+
+    expect(highlightCalls).toHaveLength(0);
+  });
+
+  test("highlights remove_node's parent path (the removed node itself is gone)", async () => {
+    const { toolRegistry, host, highlightCalls, chatState } = harness(
+      { tagName: "div", children: [{ tagName: "p", textContent: "gone" }] },
+      undefined,
+      { perception: { selection: null } },
+    );
+    const client = fakeClient([toolCallRound("c1", "remove_node", { path: ["children", 0] })]);
+
+    chatState.sendMessage("remove it");
+    await runAgentLoop({
+      chatState,
+      streamingClient: client,
+      toolRegistry,
+      systemPrompt: "",
+      host,
+    });
+
+    expect(highlightCalls).toHaveLength(1);
+    expect(highlightCalls[0]).toContainEqual([]);
   });
 });

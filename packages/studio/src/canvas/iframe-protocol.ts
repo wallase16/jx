@@ -67,6 +67,15 @@ export type ParentToIframe =
   // Draw the selection overlay regardless of where the selection change originated (canvas click,
   // Layers panel, keyboard) — the parent can't measure iframe nodes itself (cross-origin bridge).
   | { kind: "measure"; paths: (string | number)[][]; reqId: number }
+  // AI-assistant canvas perception (specs/ai-assistant.md §12): walk the currently rendered
+  // `data-jx-path` elements (optionally scoped to a subtree) and report them back as a
+  // `renderedTree`. `reqId`-correlated the same way `measure`/`geometry` already are, so a stale
+  // Enumeration from a superseded render is dropped.
+  | { kind: "enumerate"; root?: (string | number)[]; reqId: number }
+  // Transient visual emphasis on the given paths — post-tool-call feedback so the user sees what
+  // The AI assistant just changed on the live canvas (§12.5). `ttl` is milliseconds; the iframe
+  // Clears the emphasis itself after it elapses.
+  | { kind: "highlight"; paths: (string | number)[][]; ttl: number }
   // Apply a surgical edit: fold each value-carrying forward op into the shadow doc and patch the DOM
   // In place. `gen` matches the last render so the iframe drops patches superseded by a re-render.
   | { kind: "patch"; forwardOps: WireDocOp[]; gen: number }
@@ -131,6 +140,20 @@ export interface SerializableRect {
   y: number;
   width: number;
   height: number;
+}
+
+/**
+ * One node as actually rendered on the canvas right now (the `enumerate` → `renderedTree` response)
+ * — structurally identical to `@jxsuite/assistant`'s `RenderedNode` (defined independently there so
+ * the assistant package never imports studio/canvas modules; see specs/ai-assistant.md §12.2).
+ */
+export interface RenderedNode {
+  path: (string | number)[];
+  tagName: string;
+  rect: SerializableRect;
+  textSnippet?: string;
+  childCount: number;
+  hidden?: boolean;
 }
 
 // ─── Cross-frame drag-and-drop (Phase 4c) ──────────────────────────────────────
@@ -229,6 +252,9 @@ export type IframeToParent =
   // Response to `measure`: the rects of whichever requested paths resolved to a node (missing paths
   // Are simply omitted). `reqId` echoes the request so the parent can drop stale responses.
   | { kind: "geometry"; reqId: number; hits: NodeHit[] }
+  // Response to `enumerate`: every currently-rendered `data-jx-path` node (optionally scoped to a
+  // Subtree), for the AI assistant's `describe_canvas` tool. `reqId` echoes the request.
+  | { kind: "renderedTree"; reqId: number; nodes: RenderedNode[] }
   // A patch applied cleanly (echoes gen so the host can re-measure the selection overlay).
   | { kind: "patchComplete"; gen: number }
   // A patch could not be applied surgically — the parent escalates to a full render.

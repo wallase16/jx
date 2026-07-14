@@ -623,3 +623,67 @@ describe("tools — file creation", () => {
     ).toContain("Failed to write file");
   });
 });
+
+describe("tools — perception (§12.4)", () => {
+  const doc: JxMutableNode = {
+    tagName: "div",
+    children: [{ tagName: "button", textContent: "Save" }],
+  };
+
+  test("get_selection/describe_canvas/measure_nodes degrade when perception is absent", async () => {
+    const { registry } = harness(doc);
+    expect(await execErr(registry, "get_selection", {})).toContain("not available");
+    expect(await execErr(registry, "describe_canvas", {})).toContain("not available");
+    expect(await execErr(registry, "measure_nodes", { paths: [["children", 0]] })).toContain(
+      "not available",
+    );
+  });
+
+  test("get_selection returns null when nothing is selected", async () => {
+    const { registry } = harness(doc, { perception: { selection: null } });
+    const result = await registry.execute("get_selection", {});
+    expect(result).toEqual({
+      success: true,
+      data: null,
+      summary: "Nothing is currently selected.",
+    });
+  });
+
+  test("get_selection resolves the selected path to its tagName", async () => {
+    const { registry } = harness(doc, { perception: { selection: ["children", 0] } });
+    const result = await registry.execute("get_selection", {});
+    expect(result).toEqual({
+      success: true,
+      data: { path: ["children", 0], tagName: "button" },
+    });
+  });
+
+  test("describe_canvas returns the mock rendered tree, optionally scoped to root", async () => {
+    const nodes = [
+      {
+        path: ["children", 0],
+        tagName: "button",
+        rect: { height: 10, width: 20, x: 0, y: 0 },
+        childCount: 0,
+      },
+    ];
+    const { registry } = harness(doc, { perception: { renderedTree: nodes } });
+    const result = await registry.execute("describe_canvas", {});
+    expect(result).toEqual({ success: true, data: nodes });
+
+    const { registry: r2 } = harness(doc, { perception: { renderedTree: nodes } });
+    const scoped = await r2.execute("describe_canvas", { root: ["children", 0] });
+    expect(scoped.success).toBe(true);
+  });
+
+  test("measure_nodes returns rects only for paths the mock resolves", async () => {
+    const rect = { height: 10, width: 20, x: 5, y: 5 };
+    const { registry } = harness(doc, {
+      perception: { measure: [{ path: ["children", 0], rect }] },
+    });
+    const result = await registry.execute("measure_nodes", {
+      paths: [["children", 0], ["missing"]],
+    });
+    expect(result).toEqual({ success: true, data: [{ path: ["children", 0], rect }] });
+  });
+});

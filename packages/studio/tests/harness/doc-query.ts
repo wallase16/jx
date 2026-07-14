@@ -75,3 +75,15 @@ export function anyStyle(
 export function anyNode(doc: any, pred: (node: any) => boolean): boolean {
   return allNodes(doc).some((node) => pred(node));
 }
+
+/** Resolve the node at a JSON path (alternating "children"/index segments), or undefined. */
+export function nodeAt(doc: any, path: (string | number)[]): any {
+  let node = doc;
+  for (const seg of path) {
+    if (node == null) {
+      return undefined;
+    }
+    node = node[seg];
+  }
+  return node;
+}

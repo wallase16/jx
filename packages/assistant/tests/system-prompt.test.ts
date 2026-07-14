@@ -160,12 +160,20 @@ describe("system-prompt — buildSystemPrompt", () => {
   });
 
   test("environment capabilities section lists which optional host capabilities are present", () => {
-    const prompt = buildSystemPrompt({ capabilities: { files: true, renderCheck: false } });
+    const prompt = buildSystemPrompt({
+      capabilities: { files: true, renderCheck: false, perception: true },
+    });
     expect(prompt).toContain("## Environment Capabilities");
     expect(prompt).toContain("File operations");
     expect(prompt).toContain("available");
     expect(prompt).toContain("Render checking");
     expect(prompt).toContain("not available");
+    expect(prompt).toContain("Canvas perception");
+  });
+
+  test("environment capabilities section reports perception as unavailable when omitted", () => {
+    const prompt = buildSystemPrompt({ capabilities: { files: true, renderCheck: true } });
+    expect(prompt).toMatch(/Canvas perception.*not available/);
   });
 
   test("environment capabilities section is omitted when capabilities is not passed", () => {

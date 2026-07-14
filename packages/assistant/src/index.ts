@@ -13,7 +13,10 @@ export type {
   AssistantHost,
   AssistantHostDocument,
   ComponentEntry,
+  PerceptionCapability,
   RenderCheckResult,
+  RenderedNode,
+  SerializableRect,
 } from "./host.js";
 
 export { registerAiTools } from "./tools.js";

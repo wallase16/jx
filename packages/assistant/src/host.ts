@@ -37,6 +37,49 @@ export interface ComponentEntry {
 export type RenderCheckResult = { ok: true } | { ok: false; error: string };
 
 /**
+ * A node's bounding box in the canvas's own coordinate space. Structurally identical to studio's
+ * `canvas/iframe-protocol.ts` `SerializableRect` — defined fresh here (rather than imported) so
+ * this package never depends on studio/canvas modules; a host implementation's rect objects satisfy
+ * this shape without conversion (see specs/ai-assistant.md §11.2's "small deliberate
+ * duplication").
+ */
+export interface SerializableRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** One node as actually rendered on the canvas right now — ground truth vs. the document tree. */
+export interface RenderedNode {
+  path: JxPath;
+  tagName: string;
+  rect: SerializableRect;
+  textSnippet?: string;
+  childCount: number;
+  hidden?: boolean;
+}
+
+/**
+ * Optional canvas-awareness capability (specs/ai-assistant.md §12). Absent in headless/CLI hosts —
+ * the three perception tools (`get_selection`/`describe_canvas`/`measure_nodes`) degrade to "not
+ * available in this environment" when this is undefined, same as `files`/`renderCheck`.
+ */
+export interface PerceptionCapability {
+  /** The currently selected node's path, or null if nothing is selected. */
+  getSelection: () => JxPath | null;
+  /** The rendered-tree summary, optionally scoped to a subtree. */
+  getRenderedTree: (opts?: { root?: JxPath }) => Promise<RenderedNode[]>;
+  /** Current on-screen rects for the given paths (paths that don't resolve to a node are omitted). */
+  measure: (paths: JxPath[]) => Promise<{ path: JxPath; rect: SerializableRect }[]>;
+  /**
+   * Transient visual emphasis on the given paths (post-tool-call feedback). Browser-only
+   * affordance.
+   */
+  highlight?: (paths: JxPath[], opts?: { ttl?: number }) => void;
+}
+
+/**
  * Required document-mutation capability. Each method is one atomic, independently-undoable
  * transaction (a studio host wraps each in `transactDoc()`); `beginBatch`/`endBatch` group a whole
  * agent-loop turn into a single undo step.
@@ -90,4 +133,5 @@ export interface AssistantHost {
     projectRoot?: string;
   };
   renderCheck?: (doc: unknown) => Promise<RenderCheckResult>;
+  perception?: PerceptionCapability;
 }
