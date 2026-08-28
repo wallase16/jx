@@ -3,6 +3,10 @@
 > **The question:** can a tutorial video be a **manifest** rather than a recording — so that when
 > Studio's UI moves, the video is re-rendered by a script instead of re-recorded by a human?
 
+**Glossary:** [CONTEXT.md](../../CONTEXT.md). Decisions:
+[ADR-0002: No video artifact is committed](../../doc/adr/0002-no-video-artifact-is-committed.md),
+[ADR-0003: Narration-first pacing](../../doc/adr/0003-narration-first-pacing.md).
+
 **Status:** planned. Nothing in `scripts/videos/` is written yet. Branch
 `feat/tutorial-video-pipeline`, cut from `origin/main`.
 
@@ -30,14 +34,20 @@ rather than forking it — each of these took an incident to get right, and a se
 | `lib/types.ts`   | manifest validation, and the deleted-not-deprecated discipline for retired verbs                            |
 
 **The overlay is load-bearing here too.** A tutorial video types into a project for a minute or
-more, which is strictly worse than a shot pressing Enter once. Nothing a take does may reach
+more, which is strictly worse than a shot pressing Enter once. Nothing a walkthrough does may reach
 `packages/starters/**`.
 
-## The shape: a take is a shot with a script
+## The shape: a walkthrough is a shot with a clock
 
-The manifest grammar is the shot contract's five verbs plus one. A **take** is a boot (`open`) and
-an ordered list of **scenes**; a scene is one line of narration plus the steps performed while it
-is spoken.
+The manifest grammar is the shot contract's five verbs plus one. A **walkthrough** is a boot
+(`open`) and an ordered list of **cues**; a cue is one line of narration plus the steps performed
+while it is spoken, and its length is the length of that narration.
+
+The nouns are chosen against the glossary ([CONTEXT.md](../../CONTEXT.md)), not borrowed from film.
+`take` and `scene` were both rejected: in film a _take_ is one attempt at recording a shot, which is
+the opposite of a re-rendered artifact and the _smallest_ unit rather than the largest, and a
+_scene_ is an order of magnitude longer than one narrated line. **Cue** is the WebVTT sense — timed
+text with a duration — which is what actually drives the clock here.
 
 ```jsonc
 {
@@ -50,7 +60,7 @@ is spoken.
     "theme": "dark",
     "voice": "narrator-a",
   },
-  "takes": [
+  "walkthroughs": [
     {
       "name": "first-collection",
       "docs": ["start/first-collection"],
@@ -59,7 +69,7 @@ is spoken.
         "file": "pages/index.md",
         "view": "design",
       },
-      "scenes": [
+      "cues": [
         {
           "say": "Every Jx project starts with a collection — a shape your content has to fit.",
           "steps": [{ "cmd": "view.showPanel", "args": { "panel": "library" } }],
@@ -91,22 +101,23 @@ tree, TTS voice), and the only unreviewed bytes are the waveform.
 The naive order — record the browser, then narrate over it — needs the narration to fit a duration
 that was fixed before the words existed. Inverting it removes the whole problem:
 
-1. Synthesize each scene's `say` to a `.wav`.
+1. Synthesize each cue's `say` to a `.wav`.
 2. `ffprobe` it for an exact duration.
-3. Drive that scene's steps, capturing frames until the scene's audio duration is covered; `hold`
-   adds a deliberate pause after the steps settle.
-4. A scene whose steps take **longer** than its narration extends the scene and is reported — the
-   video is still correct, and the report is the prompt to write a longer line.
+3. Drive that cue's steps, capturing frames until the cue's spoken length is covered; `hold` adds a
+   deliberate pause after the steps settle.
+4. A cue whose steps run **longer** than its narration extends the cue and is reported — _acted_
+   exceeded _spoken_. The video is still correct, and the report is the prompt to write a longer
+   line.
 
-Frames are captured on a fixed wall-clock cadence during the scene, so real interaction motion
+Frames are captured on a fixed wall-clock cadence during the cue, so real interaction motion
 (a menu opening, a caret moving) is preserved. This is the one place the pipeline is deliberately
 **not** deterministic, which is why nothing it produces is committed — see below.
 
 ## Stages
 
 ```
-manifest.json ──► voice.ts   ──► scene .wav + duration   ─┐
-              └─► scene.ts   ──► frames/NNNN.png          ├─► assemble.ts ──► take.mp4
+manifest.json ──► voice.ts   ──► cue .wav + length     ─┐
+              └─► cue.ts     ──► frames/NNNN.png          ├─► assemble.ts ──► flow.mp4
                   (imports screenshots/lib)               ─┘   (ffmpeg)
 ```
 
@@ -127,14 +138,14 @@ re-rendering after a step change does not re-bill the narration.
 
 ### `lib/frames.ts` — capture
 
-`page.screenshot()` on an interval, into `.cache/videos/<take>/frames/`. Full viewport only; a
+`page.screenshot()` on an interval, into `.cache/videos/<walkthrough>/frames/`. Full viewport only; a
 video has no `capture.of` region grammar, because a cropped video of a moving app is a video of
 nothing. Frame files are numbered, so ffmpeg's `image2` demuxer reads them directly with no
 concat file.
 
 ### `lib/assemble.ts` — ffmpeg
 
-Frames → h264 at `fps`; scene wavs concatenated; the two muxed. One `ffmpeg` invocation per stage,
+Frames → h264 at `fps`; cue wavs concatenated; the two muxed. One `ffmpeg` invocation per stage,
 each logged in full, because an ffmpeg failure that is not reproducible from the log is
 undebuggable.
 
@@ -168,19 +179,19 @@ Preferred: **ffmpeg**. `regionPoint()` in `shot.ts` already returns the exact to
 coordinate of every gesture, so the log is a by-product of driving, not new machinery — and a
 capture that never touches the page cannot perturb the thing it is capturing.
 
-## One take, one flow
+## One walkthrough, one flow
 
-Takes are **micro-tutorials**: a single feature flow each, not an all-in-one tour. Two independent
+Walkthroughs are **micro-tutorials**: a single feature flow each, not an all-in-one tour. Two independent
 reasons, and they agree:
 
-- **Timing.** Narration-first pacing (above) resolves per scene, but a long take accumulates
-  scene-level over-runs into a drift that is tedious to diagnose. Short takes fail loudly and near
-  the line that caused it.
-- **Staleness.** A take is invalidated by any UI change it touches. A twelve-minute take touches
-  everything, so it is permanently stale; a ninety-second take is invalidated only by changes to
-  its own flow, and the `docs:` field says exactly which pages go stale with it.
+- **Timing.** Narration-first pacing (above) resolves per cue, but a long walkthrough accumulates
+  cue-level over-runs into a drift that is tedious to diagnose. Short ones fail loudly and near the
+  line that caused it.
+- **Staleness.** A walkthrough is invalidated by any UI change it touches. A twelve-minute one
+  touches everything, so it is permanently stale; a ninety-second one is invalidated only by
+  changes to its own flow, and the `docs:` field says exactly which pages go stale with it.
 
-Chapters are therefore a **compose step over several takes**, not a longer take — see
+Chapters are therefore a **compose step over several walkthroughs**, not a longer walkthrough — see
 [Chapters](#chapters-later-not-phase-1).
 
 ## The pipeline is a test suite
@@ -194,17 +205,17 @@ than as a viewer's confusion six months later.
 
 Two layers, matching the screenshot lanes:
 
-- **Phase 3's `check-take-contract.ts`** — no browser, seconds, red in the pull request that did
+- **Phase 3's `check-walkthrough-contract.ts`** — no browser, seconds, red in the pull request that did
   the renaming. This is where the alert should almost always come from.
 - **The render itself** — slower, needs Chrome, catches what static checking cannot: a flow that
   still names valid ids but no longer _works_.
 
 ## Chapters (later, not Phase 1)
 
-Once takes exist, a chaptered video is `assemble.ts` concatenating several takes' outputs plus a
-title card per chapter and an ffmpeg chapter-marker metadata file. It is deliberately **not** in
-Phase 1: it composes finished takes and adds no capability, so building it before a single take
-renders correctly would be building the roof first.
+Once walkthroughs exist, a chaptered video is `assemble.ts` concatenating several of their outputs
+plus a title card per chapter and an ffmpeg chapter-marker metadata file. It is deliberately **not**
+in Phase 1: it composes finished walkthroughs and adds no capability, so building it before a single
+one renders correctly would be building the roof first.
 
 ## Phases
 
@@ -215,9 +226,9 @@ executor, region resolution and `expect` evaluation must be importable **without
 tail. Refactor in place, no behaviour change; `bun run screenshots --force` must reproduce
 `capture.lock.json` byte-for-byte, which is the acceptance test.
 
-### Phase 1 — one take, silent (~1 day)
+### Phase 1 — one walkthrough, silent (~1 day)
 
-`manifest.json` with a single take over an existing screenshot fixture, `frames.ts`,
+`manifest.json` with a single walkthrough over an existing screenshot fixture, `frames.ts`,
 `assemble.ts`, the stub voice. Deliverable: an mp4 that shows Studio doing something, with no
 sound.
 
@@ -227,8 +238,8 @@ sound.
 
 ### Phase 3 — the gate (~½ day)
 
-`scripts/check-take-contract.ts`: the video analogue of `check-shot-contract.ts`. No browser,
-seconds, red in the pull request that renames a command a take names. It reuses the shot
+`scripts/check-walkthrough-contract.ts`: the video analogue of `check-shot-contract.ts`. No
+browser, seconds, red in the pull request that renames a command a walkthrough names. It reuses the shot
 contract's registry readers directly — same command ids, same region ids, same app.
 
 ### Phase 4 — CI classification (~¼ day)
@@ -248,7 +259,7 @@ Two edits, in the same pull request as Phase 1:
 Per CLAUDE.md, a behaviour-changing change lands code, spec edits and docs together. This one adds
 no product behaviour — it is tooling, like the screenshot pipeline, whose normative home is
 `scripts/screenshots/README.md` rather than a spec section. So: a `scripts/videos/README.md`
-carrying the take contract, a row in `scripts/README.md`'s directory table, and **no `spec:bump`**.
+carrying the walkthrough contract, a row in `scripts/README.md`'s directory table, and **no `spec:bump`**.
 Confirm against `bun run docs:sync` before committing.
 
 ## Open questions
@@ -256,8 +267,8 @@ Confirm against `bun run docs:sync` before committing.
 - **Cursor overlay: which of the two.** Decided in principle (see [The cursor](#the-cursor));
   the remaining choice is DOM-injected versus ffmpeg-composited, and it is cheap to defer to
   Phase 1 where both can be looked at.
-- **Which video first.** Phase 1 should retarget an existing screenshot fixture rather than
-  authoring a new project, so the first take proves the pipeline and not the fixture.
+- **Which walkthrough first.** Phase 1 should retarget an existing screenshot fixture rather than
+  authoring a new project, so the first walkthrough proves the pipeline and not the fixture.
 - **The source tutorial.** Only the premise of the tutorial being followed was provided, not its
   numbered steps. The five stages above are reconstructed from that premise; Its pro-tips (cursor
   injection, micro-tutorials, the pipeline as an alerting test suite) are folded in above. If the
