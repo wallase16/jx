@@ -347,7 +347,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function checkRemovedKeys(where: string, entry: Record<string, unknown>): void {
+export function checkRemovedKeys(where: string, entry: Record<string, unknown>): void {
   for (const key of Object.keys(entry)) {
     const replacement = REMOVED_SHOT_KEYS[key];
     if (replacement !== undefined) {
@@ -356,7 +356,7 @@ function checkRemovedKeys(where: string, entry: Record<string, unknown>): void {
   }
 }
 
-function validateOpen(where: string, open: unknown): void {
+export function validateOpen(where: string, open: unknown): void {
   if (!isRecord(open)) {
     fail(`${where}: open must be an object`);
   }
@@ -411,7 +411,7 @@ function validateOpen(where: string, open: unknown): void {
 
 const FIT_WORDS = new Set(["none", "page", "width"]);
 
-function validateStep(where: string, step: unknown): void {
+export function validateStep(where: string, step: unknown): void {
   if (!isRecord(step)) {
     fail(`${where}: every step must be an object`);
   }
@@ -455,7 +455,7 @@ function validateStep(where: string, step: unknown): void {
   }
 }
 
-function validateExpectation(where: string, entry: unknown): void {
+export function validateExpectation(where: string, entry: unknown): void {
   if (!isRecord(entry)) {
     fail(`${where}: every expect entry must be an object`);
   }
@@ -570,31 +570,34 @@ function asArray(where: string, key: string, value: unknown): unknown[] {
 }
 
 /**
- * Fold `manifest.defaults` into a shot's `open`, leaving every field decided.
+ * Fold `defaults` into an `open`, leaving every field decided.
  *
  * Field-by-field rather than object spread, because "total" has to mean total: a reader of
  * {@link ResolvedOpen} can see every input the boot depends on without going back to the manifest.
+ * Shared with `scripts/videos/lib/types.ts` — a walkthrough's `open` resolves through the same
+ * fields (`scripts/videos/PLAN.md`), and a second copy of this fold is a second answer to what
+ * "total" means.
  */
-export function resolveShot(manifest: Manifest, shot: Shot): ResolvedShot {
-  const d = manifest.defaults ?? {};
-  const o = shot.open ?? {};
+export function resolveOpenState(defaults: ShotOpen, open: ShotOpen): ResolvedOpen {
   const pick = <K extends keyof ShotOpen>(key: K): NonNullable<ShotOpen[K]> | null =>
-    (o[key] ?? d[key] ?? null) as NonNullable<ShotOpen[K]> | null;
+    (open[key] ?? defaults[key] ?? null) as NonNullable<ShotOpen[K]> | null;
   return {
-    ...shot,
-    open: {
-      clock: pick("clock"),
-      deviceScaleFactor: pick("deviceScaleFactor") ?? DEFAULT_DEVICE_SCALE_FACTOR,
-      docks: { ...d.docks, ...o.docks },
-      file: pick("file"),
-      fit: pick("fit"),
-      profile: pick("profile") ?? DEFAULT_PROFILE,
-      project: pick("project"),
-      theme: pick("theme"),
-      view: pick("view"),
-      viewport: pick("viewport") ?? DEFAULT_VIEWPORT,
-    },
+    clock: pick("clock"),
+    deviceScaleFactor: pick("deviceScaleFactor") ?? DEFAULT_DEVICE_SCALE_FACTOR,
+    docks: { ...defaults.docks, ...open.docks },
+    file: pick("file"),
+    fit: pick("fit"),
+    profile: pick("profile") ?? DEFAULT_PROFILE,
+    project: pick("project"),
+    theme: pick("theme"),
+    view: pick("view"),
+    viewport: pick("viewport") ?? DEFAULT_VIEWPORT,
   };
+}
+
+/** {@link resolveOpenState}, applied to one shot against its manifest's defaults. */
+export function resolveShot(manifest: Manifest, shot: Shot): ResolvedShot {
+  return { ...shot, open: resolveOpenState(manifest.defaults ?? {}, shot.open ?? {}) };
 }
 
 /** Every image a shot writes, in capture order — what `--only` reports and the lock will name. */

@@ -153,6 +153,11 @@ const NO_TESTS = [
   "docs/**",
   "specs/**",
   "scripts/docs/**",
+  // The video pipeline (scripts/videos/PLAN.md) imports scripts/screenshots/lib — an EXTRA_EDGES
+  // Pattern in its own right — but no studio test reads scripts/videos/** itself; its own tests run
+  // Unconditionally via `bun test --isolate scripts` (scripts/README.md), so this is only about
+  // Keeping the WORKSPACE matrix off it.
+  "scripts/videos/**",
   "sites/**",
   ".github/**",
   ".husky/**",

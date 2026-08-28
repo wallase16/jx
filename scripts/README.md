@@ -18,6 +18,7 @@ the derived answer in _both_ directions, so the failure names which side is wron
 | [`ci/`](./ci)                   | `affected.ts`, which decides what a diff can fail, plus the tests guarding it and `bundle-analysis.yml`'s `paths:` filter                                                                           |
 | [`docs/`](./docs)               | The docs, link, prose, spec-release, standards and marketing-claims gates; the reference-page generators; `spec:bump`; `unwrap-prose.ts`; shared parsers in `lib/`; `claims.json`, `standards.json` |
 | [`screenshots/`](./screenshots) | The capture pipeline and the [shot contract](./screenshots/README.md): `run.ts`, `lib/`, `affected.ts`, `thumbnails.ts`, the manifest, the lock, `fixtures/`                                        |
+| [`videos/`](./videos)           | The [walkthrough contract](./videos/README.md): `run.ts`, `draft.ts`, `lib/` (voice, pacing, cursor, walkthrough, assemble), the manifest, `PLAN.md`. No committed lock (ADR-0002).                 |
 | [`lib/`](./lib)                 | `workspaces.ts`, the one reader of the `@jxsuite` workspace graph, and `png.ts`, a dependency-free PNG decoder                                                                                      |
 | top level                       | The gates answering repo-wide questions (`check-*.ts`), the schema tools, `publish-order.ts`, `normalize-markdown.ts`                                                                               |
 
@@ -39,20 +40,20 @@ bare `bun scripts/…` step and some through the `bun run` alias named beside th
 `check-coverage-manifest.ts` runs once per workspace in the gated `test` matrix, and
 `publish-order.ts` is not a gate at all. `publish.yml` consumes its stdout.
 
-| Script                                        | Enforces                                                                                                                         |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `check-dep-rules.ts`                          | [specs/extensions.md §2](../specs/extensions.md): core packages may not depend on or import an extension                         |
-| `check-shadowed-core.ts`                      | No project root ships its own `node_modules/@jxsuite/*` shadowing the workspace (`--fix`, aliased `bun run schema:clean-roots`)  |
-| `check-template-versions.ts`                  | Every `@jxsuite` range shipping inside a template names a released version (`bun run templates:check` / `templates:sync`)        |
-| `check-command-levels.ts`                     | [specs/studio-ui-guidelines.md §12](../specs/studio-ui-guidelines.md): each `menus` placement admits the command's level         |
-| `check-chrome-budget.ts`                      | Studio chrome caps, observed from the command and panel registries rather than a hand-kept list                                  |
-| `check-shot-contract.ts`                      | Lane 1 of the screenshot gate: no browser, seconds, red in the PR that renamed the command a shot names                          |
-| `check-image-lock.ts`                         | Every committed PNG is manifest-producible, lock-named, and current (`bun run docs:images:check`)                                |
-| `check-coverage-manifest.ts`                  | Per workspace: every `src/**/*.ts` file is exercised by some test (run as `bun scripts/check-coverage-manifest.ts <dir>`)        |
-| `normalize-markdown.ts`                       | `bun run format:md` writes; `bun run docs:markdown` (`--check`) blocks on visual-editor escapes                                  |
-| `generate-schemas.ts` / `validate-schemas.ts` | `schema:generate-all` / `schema:validate-all` across every project root, including the shot fixtures                             |
-| `check-schema-freshness.ts`                   | Every tracked `*schema.json` is what its generator produces (`bun run schema:verify`; `schema:sync` fixes; `schemas.yml` pushes) |
-| `publish-order.ts`                            | Topological publish order for `publish.yml`, derived from the graph rather than a hand-kept `order` array                        |
+| Script                                        | Enforces                                                                                                                                              |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check-dep-rules.ts`                          | [specs/extensions.md §2](../specs/extensions.md): core packages may not depend on or import an extension                                              |
+| `check-shadowed-core.ts`                      | No project root ships its own `node_modules/@jxsuite/*` shadowing the workspace (`--fix`, aliased `bun run schema:clean-roots`)                       |
+| `check-template-versions.ts`                  | Every `@jxsuite` range shipping inside a template names a released version (`bun run templates:check` / `templates:sync`)                             |
+| `check-command-levels.ts`                     | [specs/studio-ui-guidelines.md §12](../specs/studio-ui-guidelines.md): each `menus` placement admits the command's level                              |
+| `check-chrome-budget.ts`                      | Studio chrome caps, observed from the command and panel registries rather than a hand-kept list                                                       |
+| `check-shot-contract.ts`                      | Lane 1 of the screenshot AND [walkthrough](./videos/README.md) gates: no browser, seconds, red in the PR that renamed the command a shot or cue names |
+| `check-image-lock.ts`                         | Every committed PNG is manifest-producible, lock-named, and current (`bun run docs:images:check`)                                                     |
+| `check-coverage-manifest.ts`                  | Per workspace: every `src/**/*.ts` file is exercised by some test (run as `bun scripts/check-coverage-manifest.ts <dir>`)                             |
+| `normalize-markdown.ts`                       | `bun run format:md` writes; `bun run docs:markdown` (`--check`) blocks on visual-editor escapes                                                       |
+| `generate-schemas.ts` / `validate-schemas.ts` | `schema:generate-all` / `schema:validate-all` across every project root, including the shot fixtures                                                  |
+| `check-schema-freshness.ts`                   | Every tracked `*schema.json` is what its generator produces (`bun run schema:verify`; `schema:sync` fixes; `schemas.yml` pushes)                      |
+| `publish-order.ts`                            | Topological publish order for `publish.yml`, derived from the graph rather than a hand-kept `order` array                                             |
 
 ## How these run
 

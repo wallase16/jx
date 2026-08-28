@@ -79,6 +79,18 @@ describe("nothing at all", () => {
     expect(d.testDirs).toEqual([]);
     expect(d.bundles).toEqual([]);
   });
+
+  test("a scripts/videos-only diff runs no WORKSPACE test job — it has its own suite", () => {
+    // No studio test reads scripts/videos/**, unlike scripts/screenshots/** (an EXTRA_EDGES
+    // Pattern that retests studio). scripts/videos/** must stay OUT of that edge and off the
+    // Workspace matrix, or it would fail open the moment it stopped matching any rule.
+    const d = decide(
+      ["scripts/videos/manifest.json", "scripts/videos/lib/walkthrough.ts"],
+      workspaces,
+    );
+    expect(d.testDirs).toEqual([]);
+    expect(d.bundles).toEqual([]);
+  });
 });
 
 describe("the nix build", () => {

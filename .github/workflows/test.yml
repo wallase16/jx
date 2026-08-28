@@ -275,11 +275,12 @@ jobs:
       # Studio chrome is capped: ≤5 commands in the Command Bar's primary cluster,
       # ≤4 tabs per dock. See UX-REDESIGN-PLAN §2, principle 9.
       - run: bun scripts/check-chrome-budget.ts
-      # Screenshot manifest — Lane 1 of the gate (UX-REDESIGN-PLAN §13.5). No browser,
-      # seconds: every shot step must name a declared, scriptable command with valid
-      # args, no `toggle*` id, and no CSS/XPath selector beyond the committed budget.
-      # `docs:verify` below checks only that referenced images EXIST; this is the check
-      # that turns a panel or command rename into a red X in the PR that caused it.
+      # Screenshot AND walkthrough manifests — Lane 1 of the gate (UX-REDESIGN-PLAN §13.5;
+      # scripts/videos/README.md). No browser, seconds: every shot/cue step must name a
+      # declared, scriptable command with valid args, no `toggle*` id, and no CSS/XPath
+      # selector beyond the committed budget. `docs:verify` below checks only that
+      # referenced images EXIST; this is the check that turns a panel or command rename
+      # into a red X in the PR that caused it. No `--manifest` flag: checks both files.
       - run: bun scripts/check-shot-contract.ts
       # The pane grid's two singleton rules (UX-REDESIGN-PLAN §18): per-stage state must live on
       # `CanvasSurface`, and a module that draws into a stage must key its instance by pane id.

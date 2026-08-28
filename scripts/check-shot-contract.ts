@@ -44,6 +44,15 @@
  * (`steps`/`expect`/`capture`), so the fixtures that prove each rule need not be rewritten with
  * it.
  *
+ * **One gate, two manifests.** `scripts/videos/manifest.json` (`scripts/videos/PLAN.md`, Phase 3)
+ * is walked by the SAME reader: a walkthrough's `cues[].steps` are exactly a shot's `steps`, so
+ * `readManifest` folds `root.walkthroughs[]` in alongside `root.shots[]` rather than growing a
+ * second definition of "a valid id". Its counts are held to their own budget
+ * ({@link WALKTHROUGH_BUDGET}), never {@link CONTRACT_BUDGET} — the screenshot manifest's ratchet
+ * has 300+ shots of history behind its numbers, and folding a three-cue walkthrough into them would
+ * make an unrelated file move a budget it did not earn. With no `--manifest` flag, `main()` checks
+ * both files in one run; `--manifest` (fixtures, tests) checks exactly the one named.
+ *
  * Run in the CI `checks` job: `bun scripts/check-shot-contract.ts` Against fixtures: `bun
  * scripts/check-shot-contract.ts --manifest <m.json> --commands <mod.ts>`
  */
@@ -89,6 +98,7 @@ export const DEFAULT_COMMAND_SOURCES = [
 ] as const;
 
 export const DEFAULT_MANIFEST = "scripts/screenshots/manifest.json";
+export const DEFAULT_VIDEOS_MANIFEST = "scripts/videos/manifest.json";
 
 /** The manifest shape this file implements. A bump is for surface SHAPE, never for content drift. */
 export const CONTRACT_VERSION = 1;
@@ -175,6 +185,23 @@ export const CONTRACT_BUDGET = {
 
 export type BudgetKey = keyof typeof CONTRACT_BUDGET;
 export type ContractCounts = Record<BudgetKey, number>;
+
+/**
+ * The same budget shape, held separately for `scripts/videos/manifest.json` — see "One gate, two
+ * manifests" above. Zero everywhere: the one committed walkthrough (`first-collection`) names only
+ * `cmd` steps against derived region ids, and any of these counts moving off zero is exactly what
+ * this budget exists to catch, the same ratchet {@link CONTRACT_BUDGET} enforces for shots.
+ */
+export const WALKTHROUGH_BUDGET: ContractCounts = {
+  argSelectors: 0,
+  clipSelectors: 0,
+  inputSteps: 0,
+  nonDerivedRegions: 0,
+  regionSelectors: 0,
+  selectorActions: 0,
+  unstable: 0,
+  waitForSelectors: 0,
+};
 
 /**
  * The toggle ids the manifest still names, and how many steps name each. **Empty, and staying so.**
@@ -479,6 +506,8 @@ interface Sighting {
 
 interface ManifestFacts {
   shots: number;
+  /** `root.walkthroughs[]` entries — `scripts/videos/manifest.json`'s own top-level array. */
+  walkthroughs: number;
   /** Shots carrying `status: {state: "quarantined"}` — read past, and reported rather than hidden. */
   quarantined: string[];
   commandSteps: CommandStep[];
@@ -527,6 +556,7 @@ export function readManifest(raw: unknown): ManifestFacts {
   };
   const facts: ManifestFacts = {
     shots: 0,
+    walkthroughs: 0,
     quarantined: [],
     commandSteps: [],
     seedSteps: [],
@@ -646,6 +676,22 @@ export function readManifest(raw: unknown): ManifestFacts {
       takeWaits(variant.waitFor);
     }
   }
+
+  // `scripts/videos/manifest.json` — same reader, same rules, own budget (see the file header,
+  // "One gate, two manifests"). A cue's `steps` are exactly a shot's `steps`; there is no
+  // `capture`, `regions`, `clip` or `variants` in the walkthrough contract, so those calls are
+  // Simply absent here rather than guarded on a shape check.
+  for (const [index, walkthrough] of records(root.walkthroughs).entries()) {
+    facts.walkthroughs += 1;
+    const name = typeof walkthrough.name === "string" ? walkthrough.name : `#${index + 1}`;
+    const label = `walkthrough "${name}"`;
+    for (const [cueIndex, cue] of records(walkthrough.cues).entries()) {
+      takeSteps(`${label} cue ${cueIndex + 1}`, cue.steps);
+    }
+    for (const assertion of records(walkthrough.expect)) {
+      takeRegion(label, assertion.region);
+    }
+  }
   return facts;
 }
 
@@ -659,6 +705,7 @@ export interface ContractResult {
   ratchets: string[];
   counts: ContractCounts;
   shots: number;
+  walkthroughs: number;
   commandSteps: number;
   commandIds: number;
   toggleSteps: number;
@@ -766,6 +813,7 @@ export function checkShotContract(input: ContractInput): ContractResult {
     ratchets,
     shots: facts.shots,
     toggleSteps,
+    walkthroughs: facts.walkthroughs,
     violations,
   };
 }
@@ -777,12 +825,22 @@ export const REMEDY =
   "delete the shot. Raising a number in CONTRACT_BUDGET or TOGGLE_DEBT needs the same written " +
   "justification as lowering a coverage threshold — those counts are the migration's scoreboard.";
 
-export function formatSummary(result: ContractResult): string {
-  const budgetLine = (Object.keys(CONTRACT_BUDGET) as BudgetKey[])
-    .map((key) => `${key} ${result.counts[key]}/${CONTRACT_BUDGET[key]}`)
+/**
+ * `entryNoun`/`budget` let the same formatter print for either manifest — "shot" against
+ * {@link CONTRACT_BUDGET} by default, or "walkthrough" against {@link WALKTHROUGH_BUDGET} for
+ * `scripts/videos/manifest.json` (see the file header, "One gate, two manifests").
+ */
+export function formatSummary(
+  result: ContractResult,
+  entryNoun: "shot" | "walkthrough" = "shot",
+  budget: Readonly<ContractCounts> = CONTRACT_BUDGET,
+): string {
+  const budgetLine = (Object.keys(budget) as BudgetKey[])
+    .map((key) => `${key} ${result.counts[key]}/${budget[key]}`)
     .join(" · ");
+  const entries = entryNoun === "shot" ? result.shots : result.walkthroughs;
   const lines = [
-    `shot-contract OK: ${result.shots} shot(s), ${result.commandSteps} command step(s) over ` +
+    `shot-contract OK: ${entries} ${entryNoun}(s), ${result.commandSteps} command step(s) over ` +
       `${result.commandIds} id(s).`,
     `  budget: ${budgetLine}`,
   ];
@@ -858,8 +916,42 @@ const USAGE =
   "Usage: bun scripts/check-shot-contract.ts [--manifest <manifest.json>] " +
   "[--commands <module.ts>]…";
 
+/**
+ * One manifest, checked and reported. `entryNoun`/`budget` are read off the parsed JSON's own shape
+ * — `walkthroughs[]` vs `shots[]` — rather than off the path, so `--manifest` pointed at either
+ * file (a fixture, or the other committed manifest) is judged correctly too.
+ */
+async function checkOneManifest(
+  path: string,
+  commands: CommandTable,
+  isDefault: boolean,
+): Promise<{ ok: boolean; report: string }> {
+  const manifest = (await Bun.file(fromRoot(path)).json()) as unknown;
+  const entryNoun =
+    isRecord(manifest) && Array.isArray(manifest.walkthroughs) ? "walkthrough" : "shot";
+  const budget = entryNoun === "walkthrough" ? WALKTHROUGH_BUDGET : CONTRACT_BUDGET;
+  const result = checkShotContract({ budget, commands, manifest });
+  if (result.violations.length > 0) {
+    const lines = [`Shot contract violations in ${path} (UX-REDESIGN-PLAN §13.2–§13.5):\n`];
+    for (const violation of result.violations) {
+      lines.push(`  ✗ ${violation}`);
+    }
+    lines.push(`\n${REMEDY}`);
+    return { ok: false, report: lines.join("\n") };
+  }
+  const lines = [formatSummary(result, entryNoun, budget)];
+  // Ratchet advice is about the COMMITTED manifest; a fixture run is under every budget by
+  // Construction and would print eight meaningless lines.
+  if (isDefault) {
+    for (const ratchet of result.ratchets) {
+      lines.push(`  ratchet: ${ratchet}`);
+    }
+  }
+  return { ok: true, report: lines.join("\n") };
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
-  let manifestPath = DEFAULT_MANIFEST;
+  let manifestPath: string | undefined;
   const sources: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -885,32 +977,24 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 2;
   }
 
-  let manifest: unknown;
-  try {
-    manifest = (await Bun.file(fromRoot(manifestPath)).json()) as unknown;
-  } catch (error) {
-    console.error(`Cannot read ${manifestPath}: ${error instanceof Error ? error.message : error}`);
-    return 2;
-  }
-
-  const result = checkShotContract({ commands, manifest });
-  if (result.violations.length > 0) {
-    console.error("Shot contract violations (UX-REDESIGN-PLAN §13.2–§13.5):\n");
-    for (const violation of result.violations) {
-      console.error(`  ✗ ${violation}`);
+  // No `--manifest` flag: check both committed manifests — "one gate, two manifests" (file
+  // Header). `--manifest` (fixtures, tests) checks exactly the one path named.
+  const paths =
+    manifestPath === undefined ? [DEFAULT_MANIFEST, DEFAULT_VIDEOS_MANIFEST] : [manifestPath];
+  let anyFailed = false;
+  for (const path of paths) {
+    let result: { ok: boolean; report: string };
+    try {
+      const isDefault = path === DEFAULT_MANIFEST || path === DEFAULT_VIDEOS_MANIFEST;
+      result = await checkOneManifest(path, commands, isDefault);
+    } catch (error) {
+      console.error(`Cannot read ${path}: ${error instanceof Error ? error.message : error}`);
+      return 2;
     }
-    console.error(`\n${REMEDY}`);
-    return 1;
+    (result.ok ? console.log : console.error)(result.report);
+    anyFailed ||= !result.ok;
   }
-  console.log(formatSummary(result));
-  // Ratchet advice is about the COMMITTED manifest; a fixture run is under every budget by
-  // Construction and would print eight meaningless lines.
-  if (manifestPath === DEFAULT_MANIFEST) {
-    for (const ratchet of result.ratchets) {
-      console.log(`  ratchet: ${ratchet}`);
-    }
-  }
-  return 0;
+  return anyFailed ? 1 : 0;
 }
 
 if (import.meta.main) {

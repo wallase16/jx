@@ -1,0 +1,40 @@
+{
+  "contract": 1,
+  "outDir": ".cache/videos",
+  "defaults": {
+    "viewport": { "width": 1920, "height": 1080 },
+    "deviceScaleFactor": 1,
+    "fps": 30,
+    "theme": "dark",
+    "voice": "narrator-a"
+  },
+  "walkthroughs": [
+    {
+      "name": "first-collection",
+      "docs": ["start/first-collection"],
+      "open": {
+        "project": "scripts/screenshots/fixtures/first-collection",
+        "file": "pages/index.md",
+        "view": "preview"
+      },
+      "cues": [
+        {
+          "say": "Every Jx project starts with a collection — a shape your content has to fit.",
+          "steps": [{ "cmd": "settings.open", "args": { "section": "content" } }]
+        },
+        {
+          "say": "Open one, and you can see every field the posts collection declares.",
+          "steps": [{ "cmd": "settings.open", "args": { "section": "content", "entry": "posts" } }]
+        },
+        {
+          "say": "Switch to the grid, and every document in the collection lines up as a row.",
+          "steps": [
+            { "cmd": "view.setActivity", "args": { "tab": "files" } },
+            { "cmd": "collection.editInGrid", "args": { "name": "posts" } }
+          ]
+        }
+      ],
+      "expect": [{ "region": "pane.primary" }]
+    }
+  ]
+}
