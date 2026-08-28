@@ -29,6 +29,7 @@
         {
           "say": "Switch to the grid, and every document in the collection lines up as a row.",
           "steps": [
+            { "input": "hover", "region": "pane.primary" },
             { "cmd": "view.setActivity", "args": { "tab": "files" } },
             { "cmd": "collection.editInGrid", "args": { "name": "posts" } }
           ]

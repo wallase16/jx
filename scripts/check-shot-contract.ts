@@ -188,14 +188,20 @@ export type ContractCounts = Record<BudgetKey, number>;
 
 /**
  * The same budget shape, held separately for `scripts/videos/manifest.json` — see "One gate, two
- * manifests" above. Zero everywhere: the one committed walkthrough (`first-collection`) names only
- * `cmd` steps against derived region ids, and any of these counts moving off zero is exactly what
- * this budget exists to catch, the same ratchet {@link CONTRACT_BUDGET} enforces for shots.
+ * manifests" above. Any of these counts moving off its committed value is exactly what this budget
+ * exists to catch, the same ratchet {@link CONTRACT_BUDGET} enforces for shots.
+ *
+ * `inputSteps` **0 → 1**: the cursor sprite (`lib/cursor.ts`) composites from logged `(t, x, y)`
+ * pointer moves, and a `cmd` step never produces one — it is a direct command invocation, not a
+ * simulated gesture, the same distinction §13.3 draws for shots. `first-collection`'s third cue now
+ * opens with `{input: "hover", region: "pane.primary"}` so the cursor a viewer sees tracking across
+ * the canvas is a real logged gesture rather than nothing at all. `pane.primary` is a bare surface
+ * (a DERIVED region — see `isDerivedRegionId`), so `nonDerivedRegions` stays at 0.
  */
 export const WALKTHROUGH_BUDGET: ContractCounts = {
   argSelectors: 0,
   clipSelectors: 0,
-  inputSteps: 0,
+  inputSteps: 1,
   nonDerivedRegions: 0,
   regionSelectors: 0,
   selectorActions: 0,
