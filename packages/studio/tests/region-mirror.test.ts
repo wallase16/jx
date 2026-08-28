@@ -1,5 +1,5 @@
 /**
- * `scripts/screenshots/lib/shot.ts` mirrors `src/ui/regions.ts` BY HAND.
+ * `scripts/screenshots/lib/drive.ts` mirrors `src/ui/regions.ts` BY HAND.
  *
  * It has to: `page.evaluate` ships a function's own source into the browser and cannot carry its
  * imports, so the shot runner carries a second copy of region resolution. Its docstring says "the
@@ -20,10 +20,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveRegion } from "../src/ui/regions";
 
-/** The mirror, lifted out of `shot.ts` by reading its source — so the test cannot drift from it. */
+/** The mirror, lifted out of `drive.ts` by reading its source — so the test cannot drift from it. */
 function mirrorResolver(): (id: string) => HTMLElement | null {
   const src = readFileSync(
-    join(import.meta.dir, "../../../scripts/screenshots/lib/shot.ts"),
+    join(import.meta.dir, "../../../scripts/screenshots/lib/drive.ts"),
     "utf8",
   );
   const start = src.indexOf('  const ATTR = "data-jx-region";');
